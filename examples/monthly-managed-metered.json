@@ -1,0 +1,11 @@
+[
+  {
+    "mode": "managed",
+    "type": "subscription",
+    "interval": "month",
+    "amountCents": 18,
+    "billingScheme": "metered",
+    "includedUsageUnits": 1000,
+    "billingPremiumPercent": 30
+  }
+]

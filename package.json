@@ -1,0 +1,56 @@
+{
+  "name": "paywallm",
+  "version": "0.1.0",
+  "description": "Small AWS-hosted auth, paywall, and LLM relay service with a global admin CLI.",
+  "license": "MIT",
+  "type": "module",
+  "files": [
+    "dist/src",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "paywall",
+    "stripe",
+    "aws",
+    "llm",
+    "cli"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "bin": {
+    "paywallm": "./dist/src/cli.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "sst dev",
+    "deploy": "sst deploy",
+    "remove": "sst remove",
+    "cli": "tsx src/cli.ts",
+    "test": "tsx --test test/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "prepare": "yarn build"
+  },
+  "dependencies": {
+    "@aws-crypto/sha256-js": "^5.2.0",
+    "@aws-sdk/client-dynamodb": "^3.883.0",
+    "@aws-sdk/client-kms": "^3.883.0",
+    "@aws-sdk/client-ses": "^3.883.0",
+    "@aws-sdk/client-sts": "^3.883.0",
+    "@aws-sdk/credential-provider-node": "^3.883.0",
+    "@aws-sdk/lib-dynamodb": "^3.883.0",
+    "@aws-sdk/protocol-http": "^3.374.0",
+    "@aws-sdk/signature-v4": "^3.374.0",
+    "dotenv": "^16.6.1",
+    "stripe": "^18.5.0",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/aws-lambda": "^8.10.152",
+    "@types/node": "^24.4.0",
+    "sst": "^3.17.11",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2"
+  }
+}

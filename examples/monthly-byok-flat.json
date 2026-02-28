@@ -1,0 +1,8 @@
+[
+  {
+    "mode": "byok",
+    "type": "subscription",
+    "interval": "month",
+    "amountCents": 700
+  }
+]

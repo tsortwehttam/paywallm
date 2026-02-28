@@ -1,0 +1,9 @@
+.env
+.env.*
+!.env.example
+.sst
+.serverless
+.build
+node_modules
+dist
+yarn-error.log

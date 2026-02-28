@@ -1,0 +1,27 @@
+[
+  {
+    "mode": "byok",
+    "type": "one_time",
+    "amountCents": 1499
+  },
+  {
+    "mode": "byok",
+    "type": "subscription",
+    "interval": "month",
+    "amountCents": 600
+  },
+  {
+    "mode": "managed",
+    "type": "one_time",
+    "amountCents": 2999
+  },
+  {
+    "mode": "managed",
+    "type": "subscription",
+    "interval": "month",
+    "amountCents": 20,
+    "billingScheme": "metered",
+    "includedUsageUnits": 1000,
+    "billingPremiumPercent": 25
+  }
+]
