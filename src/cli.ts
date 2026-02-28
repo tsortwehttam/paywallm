@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { access, readFile } from "node:fs/promises";
-import { constants } from "node:fs";
+import { constants, realpathSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
@@ -922,5 +922,13 @@ if (isDirectRun()) {
 }
 
 function isDirectRun(): boolean {
-  return process.argv[1] === fileURLToPath(import.meta.url);
+  if (!process.argv[1]) {
+    return false;
+  }
+
+  try {
+    return realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
 }
