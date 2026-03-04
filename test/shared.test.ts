@@ -230,6 +230,13 @@ test("parseAppRecord validates stored app rows", () => {
         legalText: "By continuing, you agree to the terms.",
         preferredTheme: "system",
         allowedOrigins: ["https://app.example.com"],
+        copy: {
+          plansSubtitle: "Pick the plan that works best for you.",
+          byokSubtitle: "Paste your key from your AI provider dashboard.",
+          tokenExplanation: "Tokens are how AI usage is measured.",
+          tokenHelpUrl: "https://example.com/help/tokens",
+          tokenHelpLabel: "What are tokens?",
+        },
       },
       prices: [
         {
@@ -265,6 +272,13 @@ test("parseAppRecord validates stored app rows", () => {
         legalText: "By continuing, you agree to the terms.",
         preferredTheme: "system",
         allowedOrigins: ["https://app.example.com"],
+        copy: {
+          plansSubtitle: "Pick the plan that works best for you.",
+          byokSubtitle: "Paste your key from your AI provider dashboard.",
+          tokenExplanation: "Tokens are how AI usage is measured.",
+          tokenHelpUrl: "https://example.com/help/tokens",
+          tokenHelpLabel: "What are tokens?",
+        },
       },
       prices: [
         {

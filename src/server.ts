@@ -40,6 +40,7 @@ import {
   parseProvider,
   parseProviderKeyRecord,
   parseStoredSessionRecord,
+  parseCliPriceFlag,
   readPrices,
   type ApiErrorResponse,
   type AppBranding,
@@ -96,6 +97,8 @@ export async function handler(
 
     const route = `${event.requestContext.http.method} ${event.rawPath}`;
 
+    if (route === "GET /preview") return paywallBuilderPage(event);
+    if (route === "GET /preview/paywall") return paywallPreviewPage(event);
     if (route === "GET /p/" + event.pathParameters?.appId) return paywallPage(event);
     if (route === "POST /auth/start") return withCors(event, await authStart(event));
     if (route === "POST /auth/verify") return withCors(event, await authVerify(event));
@@ -387,6 +390,109 @@ async function paywallPage(
       "content-type": "text/html; charset=utf-8",
       "cache-control": "no-store",
       "content-security-policy": buildPaywallCsp(app.branding.allowedOrigins),
+    },
+    body: html,
+  };
+}
+
+async function paywallPreviewPage(
+  event: APIGatewayProxyEventV2,
+): Promise<APIGatewayProxyStructuredResultV2> {
+  const params = readQueryParams(event);
+  const appId = previewParam(params, "app-id") ?? "preview-app";
+  const name = previewParam(params, "name") ?? "Paywall Preview";
+
+  const copy: Record<string, string> = {};
+  const heroSubtitle = previewParam(params, "hero-subtitle");
+  const accessSubtitle = previewParam(params, "access-subtitle");
+  const plansSubtitle = previewParam(params, "plans-subtitle");
+  const byokSubtitle = previewParam(params, "byok-subtitle");
+  const tokenExplanation = previewParam(params, "token-explanation");
+  const tokenHelpUrl = previewParam(params, "token-help-url");
+  const tokenHelpLabel = previewParam(params, "token-help-label");
+  if (heroSubtitle) copy.heroSubtitle = heroSubtitle;
+  if (accessSubtitle) copy.accessSubtitle = accessSubtitle;
+  if (plansSubtitle) copy.plansSubtitle = plansSubtitle;
+  if (byokSubtitle) copy.byokSubtitle = byokSubtitle;
+  if (tokenExplanation) copy.tokenExplanation = tokenExplanation;
+  if (tokenHelpUrl) copy.tokenHelpUrl = tokenHelpUrl;
+  if (tokenHelpLabel) copy.tokenHelpLabel = tokenHelpLabel;
+
+  const branding = parseAppBranding(
+    {
+      appName: previewParam(params, "app-name") ?? name,
+      logoUrl: previewParam(params, "logo-url"),
+      primaryColor: previewParam(params, "primary-color"),
+      accentColor: previewParam(params, "accent-color"),
+      preferredTheme: previewParam(params, "theme"),
+      supportUrl: previewParam(params, "support-url"),
+      legalText: previewParam(params, "legal-text"),
+      allowedOrigins: params.getAll("origin"),
+      copy: Object.keys(copy).length > 0 ? copy : undefined,
+    },
+    name,
+  );
+
+  const prices = readPreviewPrices(params);
+  const now = nowIso();
+  const app: AppRecord = {
+    appId,
+    name,
+    stripeProductId: undefined,
+    branding,
+    prices,
+    createdAt: now,
+    updatedAt: now,
+  };
+
+  const previewModeRaw = previewParam(params, "preview-mode");
+  const previewMode = previewModeRaw === "managed" || previewModeRaw === "byok" ? previewModeRaw : undefined;
+  const html = renderPaywallHtml({
+    app,
+    embed: readPreviewBoolean(params, "embed"),
+    prefillEmail: previewParam(params, "email") ?? "",
+    successUrl: previewParam(params, "success-url") ?? "",
+    cancelUrl: previewParam(params, "cancel-url") ?? "",
+    returnUrl: previewParam(params, "return-url") ?? "",
+    checkoutState: previewParam(params, "checkout-state") ?? "",
+    preview: {
+      enabled: true,
+      email: previewParam(params, "preview-email") ?? "preview@example.com",
+      paid: readPreviewBoolean(params, "preview-paid", true),
+      mode:
+        previewMode ??
+        (prices.some((price) => price.mode === "byok") ? "byok" : "managed"),
+    },
+  });
+
+  return {
+    statusCode: 200,
+    headers: {
+      "content-type": "text/html; charset=utf-8",
+      "cache-control": "no-store",
+      "content-security-policy": buildPaywallCsp(branding.allowedOrigins),
+    },
+    body: html,
+  };
+}
+
+async function paywallBuilderPage(
+  event: APIGatewayProxyEventV2,
+): Promise<APIGatewayProxyStructuredResultV2> {
+  const html = renderPaywallBuilderHtml(event.rawPath);
+  return {
+    statusCode: 200,
+    headers: {
+      "content-type": "text/html; charset=utf-8",
+      "cache-control": "no-store",
+      "content-security-policy": [
+        "default-src 'self'",
+        "style-src 'self' 'unsafe-inline'",
+        "script-src 'self' 'unsafe-inline'",
+        "img-src 'self' data: https:",
+        "base-uri 'none'",
+        "object-src 'none'",
+      ].join("; "),
     },
     body: html,
   };
@@ -1213,6 +1319,40 @@ function readQueryParam(event: APIGatewayProxyEventV2, name: string): string | u
   return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
+function readQueryParams(event: APIGatewayProxyEventV2): URLSearchParams {
+  return new URLSearchParams(event.rawQueryString ?? "");
+}
+
+function previewParam(params: URLSearchParams, name: string): string | undefined {
+  const value =
+    params.get(name) ??
+    params.get(name.replaceAll("-", "_")) ??
+    params.get(name.replace(/-([a-z])/g, (_, char) => char.toUpperCase()));
+  return value && value.length > 0 ? value : undefined;
+}
+
+function readPreviewBoolean(
+  params: URLSearchParams,
+  name: string,
+  fallback = false,
+): boolean {
+  const value = previewParam(params, name);
+  if (!value) return fallback;
+  return value === "1" || value.toLowerCase() === "true";
+}
+
+function readPreviewPrices(params: URLSearchParams): AppPrice[] {
+  const specs = params.getAll("price");
+  if (specs.length === 0) {
+    return [
+      parseCliPriceFlag("managed:subscription:month:999"),
+      parseCliPriceFlag("byok:subscription:month:499"),
+    ];
+  }
+
+  return specs.map((spec) => parseCliPriceFlag(spec));
+}
+
 function parseAppBranding(
   value: unknown,
   fallbackName: string,
@@ -1231,6 +1371,21 @@ function parseAppBranding(
   }
 
   const row = typeof value === "object" && value && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+  const copyRow =
+    typeof row.copy === "object" && row.copy && !Array.isArray(row.copy)
+      ? (row.copy as Record<string, unknown>)
+      : {};
+  const copy = {
+    heroSubtitle: textOrUndefined(copyRow.heroSubtitle) ?? existing?.copy?.heroSubtitle,
+    accessSubtitle: textOrUndefined(copyRow.accessSubtitle) ?? existing?.copy?.accessSubtitle,
+    plansSubtitle: textOrUndefined(copyRow.plansSubtitle) ?? existing?.copy?.plansSubtitle,
+    byokSubtitle: textOrUndefined(copyRow.byokSubtitle) ?? existing?.copy?.byokSubtitle,
+    tokenExplanation: textOrUndefined(copyRow.tokenExplanation) ?? existing?.copy?.tokenExplanation,
+    tokenHelpUrl: textOrUndefined(copyRow.tokenHelpUrl) ?? existing?.copy?.tokenHelpUrl,
+    tokenHelpLabel: textOrUndefined(copyRow.tokenHelpLabel) ?? existing?.copy?.tokenHelpLabel,
+  };
+  const hasCopy = Object.values(copy).some((value) => value !== undefined);
+
   return AppBrandingSchema.parse({
     appName: textOrUndefined(row.appName) ?? existing?.appName ?? fallbackName,
     logoUrl: textOrUndefined(row.logoUrl) ?? existing?.logoUrl,
@@ -1243,6 +1398,7 @@ function parseAppBranding(
       Array.isArray(row.allowedOrigins)
         ? row.allowedOrigins
         : existing?.allowedOrigins ?? [],
+    copy: hasCopy ? copy : undefined,
   });
 }
 
@@ -1463,7 +1619,26 @@ function renderPaywallHtml(input: {
   cancelUrl: string;
   returnUrl: string;
   checkoutState: string;
+  preview?: {
+    enabled: boolean;
+    email: string;
+    paid: boolean;
+    mode: Mode;
+  };
 }): string {
+  const copy = input.app.branding.copy;
+  const hasMeteredPlan = input.app.prices.some((price) => price.billingScheme === "metered");
+  const tokenHelpLabel = copy?.tokenHelpLabel ?? "Learn more";
+  const tokenHelpHtml =
+    hasMeteredPlan && (copy?.tokenExplanation || copy?.tokenHelpUrl)
+      ? `<div class="subtle" style="margin-top:10px;">${
+          copy?.tokenExplanation ? escapeHtml(copy.tokenExplanation) : ""
+        }${
+          copy?.tokenHelpUrl
+            ? `${copy?.tokenExplanation ? " " : ""}<a href="${escapeHtml(copy.tokenHelpUrl)}" target="_blank" rel="noreferrer">${escapeHtml(tokenHelpLabel)}</a>`
+            : ""
+        }</div>`
+      : "";
   const bootstrap = JSON.stringify({
     appId: input.app.appId,
     branding: input.app.branding,
@@ -1474,6 +1649,7 @@ function renderPaywallHtml(input: {
     cancelUrl: input.cancelUrl,
     returnUrl: input.returnUrl,
     checkoutState: input.checkoutState,
+    preview: input.preview,
   });
 
   return `<!doctype html>
@@ -1680,7 +1856,10 @@ function renderPaywallHtml(input: {
             ${input.app.branding.logoUrl ? `<img src="${escapeHtml(input.app.branding.logoUrl)}" alt="${escapeHtml(input.app.branding.appName)} logo">` : ""}
             <div>
               <h1>${escapeHtml(input.app.branding.appName)}</h1>
-              <p>You are signing into ${escapeHtml(input.app.branding.appName)}. Secure access, payment, and optional bring-your-own-key setup are handled here.</p>
+              <p>${escapeHtml(
+                copy?.heroSubtitle ??
+                  `You are signing into ${input.app.branding.appName}. Secure access, payment, and optional bring-your-own-key setup are handled here.`,
+              )}</p>
             </div>
           </div>
           <div class="hero-actions">
@@ -1691,7 +1870,7 @@ function renderPaywallHtml(input: {
         <section class="content">
           <div class="card">
             <h2>Access</h2>
-            <div class="subtle">Use a one-time email code. This works in a browser, iframe, mobile webview, or game overlay.</div>
+            <div class="subtle">${escapeHtml(copy?.accessSubtitle ?? "Use a one-time email code. This works in a browser, iframe, mobile webview, or game overlay.")}</div>
             <div id="status" class="status" aria-live="polite"></div>
             <form id="startForm">
               <div class="row">
@@ -1723,12 +1902,13 @@ function renderPaywallHtml(input: {
           </div>
           <div class="card">
             <h2>Plans</h2>
-            <div class="subtle">Choose the tier that matches how you want to use ${escapeHtml(input.app.branding.appName)}.</div>
+            <div class="subtle">${escapeHtml(copy?.plansSubtitle ?? `Choose the tier that matches how you want to use ${input.app.branding.appName}.`)}</div>
             <div id="plans" class="plans" style="margin-top:14px;"></div>
+            ${tokenHelpHtml}
           </div>
           <div class="card hidden" id="byokCard">
             <h2>Bring Your Own Key</h2>
-            <div class="subtle">If your plan allows BYOK, save your provider key here so requests run against your own account.</div>
+            <div class="subtle">${escapeHtml(copy?.byokSubtitle ?? "If your plan allows BYOK, save your provider key here so requests run against your own account.")}</div>
             <form id="byokForm" style="margin-top:12px;">
               <div class="split">
                 <div class="row">
@@ -1795,6 +1975,9 @@ function renderPaywallHtml(input: {
       }
 
       async function api(path, method, body, useAuth) {
+        if (bootstrap.preview && bootstrap.preview.enabled) {
+          throw new Error("Preview mode: action disabled.");
+        }
         const headers = { "content-type": "application/json" };
         if (useAuth && state.token) {
           headers.authorization = "Bearer " + state.token;
@@ -2013,20 +2196,408 @@ function renderPaywallHtml(input: {
 
       renderPlans();
       renderAccount();
-      loadMe().finally(() => {
-        emit("ready", { appId: bootstrap.appId, height: document.documentElement.scrollHeight });
-        if (bootstrap.checkoutState === "success") {
-          emit("checkout_completed", { status: "success" });
-        }
-        if (bootstrap.checkoutState === "cancel") {
-          emit("checkout_completed", { status: "cancel" });
-        }
+      if (bootstrap.preview && bootstrap.preview.enabled) {
+        state.me = {
+          email: bootstrap.preview.email || "preview@example.com",
+          membership: {
+            paid: Boolean(bootstrap.preview.paid),
+            mode: bootstrap.preview.mode || "managed",
+          },
+        };
+        renderAccount();
+        setStatus("Preview mode: auth, checkout, and key-save actions are disabled.", false);
+        emit("ready", { appId: bootstrap.appId, height: document.documentElement.scrollHeight, preview: true });
         emit("resize", { height: document.documentElement.scrollHeight });
-      });
+      } else {
+        loadMe().finally(() => {
+          emit("ready", { appId: bootstrap.appId, height: document.documentElement.scrollHeight });
+          if (bootstrap.checkoutState === "success") {
+            emit("checkout_completed", { status: "success" });
+          }
+          if (bootstrap.checkoutState === "cancel") {
+            emit("checkout_completed", { status: "cancel" });
+          }
+          emit("resize", { height: document.documentElement.scrollHeight });
+        });
+      }
 
       function escapeHtmlJs(value) {
         return String(value).replace(/[&<>"]/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[char] || char));
       }
+    </script>
+  </body>
+</html>`;
+}
+
+function renderPaywallBuilderHtml(pathname: string): string {
+  const paywallPreviewPath = `${pathname.endsWith("/") ? pathname.slice(0, -1) : pathname}/paywall`;
+  return `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Paywall Preview Builder</title>
+    <style>
+      :root {
+        --bg: #f4f6fa;
+        --surface: #ffffff;
+        --text: #0f172a;
+        --muted: #475569;
+        --border: #dbe2ea;
+        --primary: #1f6feb;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        background: linear-gradient(180deg, #f7f9fc, #eef2f8);
+        color: var(--text);
+      }
+      .shell {
+        max-width: 1100px;
+        margin: 0 auto;
+        padding: 24px 18px 40px;
+        display: grid;
+        gap: 14px;
+      }
+      .card {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 16px;
+        padding: 16px;
+      }
+      h1, h2 { margin: 0; }
+      h1 { font-size: 28px; }
+      h2 { font-size: 16px; }
+      .subtle { color: var(--muted); margin-top: 8px; font-size: 14px; }
+      .row { display: grid; gap: 8px; }
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+        gap: 10px;
+        margin-top: 12px;
+      }
+      label { font-size: 12px; font-weight: 700; color: #334155; }
+      input, select, textarea {
+        width: 100%;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 10px 11px;
+        font: inherit;
+        color: var(--text);
+        background: white;
+      }
+      textarea { min-height: 88px; resize: vertical; }
+      .actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-top: 12px;
+      }
+      button {
+        border: 1px solid var(--border);
+        background: white;
+        color: var(--text);
+        border-radius: 10px;
+        padding: 10px 12px;
+        font-weight: 700;
+        cursor: pointer;
+      }
+      .primary {
+        background: var(--primary);
+        color: white;
+        border-color: var(--primary);
+      }
+      .preset { font-size: 13px; }
+      .urlbox {
+        width: 100%;
+        min-height: 120px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+        font-size: 12px;
+      }
+      .footer {
+        font-size: 12px;
+        color: var(--muted);
+      }
+      .checks {
+        display: flex;
+        gap: 14px;
+        flex-wrap: wrap;
+        margin-top: 8px;
+      }
+      .checks label {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 13px;
+        font-weight: 600;
+        color: var(--text);
+      }
+      .checks input[type="checkbox"] {
+        width: auto;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="shell">
+      <div class="card">
+        <h1>Paywall Preview Builder</h1>
+        <div class="subtle">Create a preview URL for <code>${escapeHtml(paywallPreviewPath)}</code> using CLI-equivalent query params.</div>
+        <div class="actions">
+          <button class="preset" id="presetConsumer" type="button">Preset: Consumer Managed</button>
+          <button class="preset" id="presetByok" type="button">Preset: BYOK Friendly</button>
+          <button class="preset" id="presetMixed" type="button">Preset: Mixed + Metered</button>
+          <button class="preset" id="presetReset" type="button">Reset</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>App + Branding</h2>
+        <div class="grid">
+          <div class="row"><label for="name">name</label><input id="name" /></div>
+          <div class="row"><label for="appName">app-name</label><input id="appName" /></div>
+          <div class="row"><label for="logoUrl">logo-url</label><input id="logoUrl" placeholder="https://..." /></div>
+          <div class="row"><label for="theme">theme</label><select id="theme"><option value="">(default)</option><option>light</option><option>dark</option><option>system</option></select></div>
+          <div class="row"><label for="primaryColor">primary-color</label><input id="primaryColor" placeholder="#1f6feb" /></div>
+          <div class="row"><label for="accentColor">accent-color</label><input id="accentColor" placeholder="#0f172a" /></div>
+          <div class="row"><label for="supportUrl">support-url</label><input id="supportUrl" placeholder="https://..." /></div>
+          <div class="row"><label for="legalText">legal-text</label><input id="legalText" /></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Copy</h2>
+        <div class="grid">
+          <div class="row"><label for="heroSubtitle">hero-subtitle</label><input id="heroSubtitle" /></div>
+          <div class="row"><label for="accessSubtitle">access-subtitle</label><input id="accessSubtitle" /></div>
+          <div class="row"><label for="plansSubtitle">plans-subtitle</label><input id="plansSubtitle" /></div>
+          <div class="row"><label for="byokSubtitle">byok-subtitle</label><input id="byokSubtitle" /></div>
+          <div class="row"><label for="tokenExplanation">token-explanation</label><input id="tokenExplanation" /></div>
+          <div class="row"><label for="tokenHelpUrl">token-help-url</label><input id="tokenHelpUrl" placeholder="https://..." /></div>
+          <div class="row"><label for="tokenHelpLabel">token-help-label</label><input id="tokenHelpLabel" /></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Prices + Preview State</h2>
+        <div class="row">
+          <label for="prices">price (one per line, same as CLI shorthand)</label>
+          <textarea id="prices" placeholder="managed:subscription:month:15:metered:1000:25&#10;byok:subscription:month:700"></textarea>
+        </div>
+        <div class="grid">
+          <div class="row"><label for="previewMode">preview-mode</label><select id="previewMode"><option value="">auto</option><option>managed</option><option>byok</option></select></div>
+          <div class="row"><label for="previewEmail">preview-email</label><input id="previewEmail" placeholder="preview@example.com" /></div>
+        </div>
+        <div class="checks">
+          <label><input id="previewPaid" type="checkbox" checked /> preview-paid</label>
+          <label><input id="embed" type="checkbox" /> embed</label>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Generated URL</h2>
+        <textarea class="urlbox" id="previewUrl" readonly></textarea>
+        <div class="actions">
+          <button class="primary" id="openPreview" type="button">Open Preview</button>
+          <button id="copyUrl" type="button">Copy URL</button>
+        </div>
+        <div class="footer" id="status"></div>
+      </div>
+    </div>
+    <script>
+      const previewPath = ${JSON.stringify(paywallPreviewPath)};
+      const fields = {
+        name: document.getElementById("name"),
+        appName: document.getElementById("appName"),
+        logoUrl: document.getElementById("logoUrl"),
+        theme: document.getElementById("theme"),
+        primaryColor: document.getElementById("primaryColor"),
+        accentColor: document.getElementById("accentColor"),
+        supportUrl: document.getElementById("supportUrl"),
+        legalText: document.getElementById("legalText"),
+        heroSubtitle: document.getElementById("heroSubtitle"),
+        accessSubtitle: document.getElementById("accessSubtitle"),
+        plansSubtitle: document.getElementById("plansSubtitle"),
+        byokSubtitle: document.getElementById("byokSubtitle"),
+        tokenExplanation: document.getElementById("tokenExplanation"),
+        tokenHelpUrl: document.getElementById("tokenHelpUrl"),
+        tokenHelpLabel: document.getElementById("tokenHelpLabel"),
+        prices: document.getElementById("prices"),
+        previewMode: document.getElementById("previewMode"),
+        previewEmail: document.getElementById("previewEmail"),
+        previewPaid: document.getElementById("previewPaid"),
+        embed: document.getElementById("embed"),
+      };
+
+      const previewUrlBox = document.getElementById("previewUrl");
+      const status = document.getElementById("status");
+
+      const defaults = {
+        name: "Paywall Preview",
+        appName: "Paywall Preview",
+        logoUrl: "",
+        theme: "light",
+        primaryColor: "#1f6feb",
+        accentColor: "#0f172a",
+        supportUrl: "",
+        legalText: "",
+        heroSubtitle: "",
+        accessSubtitle: "",
+        plansSubtitle: "",
+        byokSubtitle: "",
+        tokenExplanation: "",
+        tokenHelpUrl: "",
+        tokenHelpLabel: "",
+        prices: "managed:subscription:month:999\\nbyok:subscription:month:499",
+        previewMode: "",
+        previewEmail: "preview@example.com",
+        previewPaid: true,
+        embed: false,
+      };
+
+      const presets = {
+        consumer: {
+          name: "BrightNotes",
+          appName: "BrightNotes",
+          theme: "light",
+          primaryColor: "#0f766e",
+          accentColor: "#0f172a",
+          plansSubtitle: "Choose the plan that fits your writing workflow.",
+          prices: "managed:subscription:month:1299",
+          previewMode: "managed",
+          tokenExplanation: "",
+          tokenHelpUrl: "",
+          tokenHelpLabel: "",
+          byokSubtitle: "",
+        },
+        byok: {
+          name: "Prompt Studio",
+          appName: "Prompt Studio",
+          theme: "dark",
+          primaryColor: "#2563eb",
+          accentColor: "#0f172a",
+          plansSubtitle: "Use managed billing or connect your own provider key.",
+          byokSubtitle: "Paste your provider API key from your account dashboard.",
+          tokenExplanation: "Tokens are the units used to measure model usage.",
+          tokenHelpUrl: "https://platform.openai.com/tokenizer",
+          tokenHelpLabel: "Token guide",
+          prices: "byok:subscription:month:700\\nmanaged:subscription:month:1500",
+          previewMode: "byok",
+        },
+        mixed: {
+          name: "Game Copilot",
+          appName: "Game Copilot",
+          theme: "system",
+          primaryColor: "#7c3aed",
+          accentColor: "#111827",
+          plansSubtitle: "Start simple, then upgrade as your usage grows.",
+          byokSubtitle: "If you choose BYOK, save your key once and we will use it for your requests.",
+          tokenExplanation: "Usage-based plans bill by tokens, which count model input and output text.",
+          tokenHelpUrl: "https://help.openai.com/en/articles/4936856-what-are-tokens-and-how-to-count-them",
+          tokenHelpLabel: "What is a token?",
+          prices: "managed:subscription:month:15:metered:1000:25\\nmanaged:one_time:-:2999\\nbyok:subscription:month:600",
+          previewMode: "",
+        },
+      };
+
+      function setValues(values) {
+        for (const [key, value] of Object.entries(values)) {
+          if (!(key in fields)) continue;
+          const node = fields[key];
+          if (node.type === "checkbox") {
+            node.checked = Boolean(value);
+          } else {
+            node.value = value == null ? "" : String(value);
+          }
+        }
+      }
+
+      function toPairs() {
+        const pairs = [];
+        const add = (key, value) => {
+          const text = String(value || "").trim();
+          if (text.length > 0) pairs.push([key, text]);
+        };
+
+        add("name", fields.name.value);
+        add("app-name", fields.appName.value);
+        add("logo-url", fields.logoUrl.value);
+        add("theme", fields.theme.value);
+        add("primary-color", fields.primaryColor.value);
+        add("accent-color", fields.accentColor.value);
+        add("support-url", fields.supportUrl.value);
+        add("legal-text", fields.legalText.value);
+        add("hero-subtitle", fields.heroSubtitle.value);
+        add("access-subtitle", fields.accessSubtitle.value);
+        add("plans-subtitle", fields.plansSubtitle.value);
+        add("byok-subtitle", fields.byokSubtitle.value);
+        add("token-explanation", fields.tokenExplanation.value);
+        add("token-help-url", fields.tokenHelpUrl.value);
+        add("token-help-label", fields.tokenHelpLabel.value);
+
+        const lines = fields.prices.value
+          .split(/\\r?\\n/)
+          .map((line) => line.trim())
+          .filter(Boolean);
+        for (const line of lines) pairs.push(["price", line]);
+
+        add("preview-mode", fields.previewMode.value);
+        add("preview-email", fields.previewEmail.value);
+        pairs.push(["preview-paid", fields.previewPaid.checked ? "1" : "0"]);
+        if (fields.embed.checked) pairs.push(["embed", "1"]);
+        return pairs;
+      }
+
+      function buildUrl() {
+        const query = new URLSearchParams();
+        for (const [key, value] of toPairs()) {
+          query.append(key, value);
+        }
+        return previewPath + "?" + query.toString();
+      }
+
+      function updateUrl() {
+        const url = buildUrl();
+        previewUrlBox.value = url;
+      }
+
+      function applyPreset(name) {
+        setValues(defaults);
+        if (presets[name]) setValues(presets[name]);
+        updateUrl();
+      }
+
+      function bindUpdates() {
+        for (const node of Object.values(fields)) {
+          const eventName = node.type === "checkbox" ? "change" : "input";
+          node.addEventListener(eventName, updateUrl);
+        }
+      }
+
+      document.getElementById("presetConsumer").addEventListener("click", () => applyPreset("consumer"));
+      document.getElementById("presetByok").addEventListener("click", () => applyPreset("byok"));
+      document.getElementById("presetMixed").addEventListener("click", () => applyPreset("mixed"));
+      document.getElementById("presetReset").addEventListener("click", () => {
+        setValues(defaults);
+        updateUrl();
+      });
+
+      document.getElementById("openPreview").addEventListener("click", () => {
+        window.open(previewUrlBox.value, "_blank", "noopener,noreferrer");
+      });
+
+      document.getElementById("copyUrl").addEventListener("click", async () => {
+        try {
+          await navigator.clipboard.writeText(previewUrlBox.value);
+          status.textContent = "Copied preview URL.";
+        } catch {
+          status.textContent = "Copy failed. Select and copy manually.";
+        }
+      });
+
+      bindUpdates();
+      setValues(defaults);
+      updateUrl();
     </script>
   </body>
 </html>`;

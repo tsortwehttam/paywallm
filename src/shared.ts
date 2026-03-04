@@ -12,6 +12,18 @@ export type Provider = z.infer<typeof ProviderSchema>;
 export type PreferredTheme = z.infer<typeof PreferredThemeSchema>;
 export type BillingScheme = z.infer<typeof BillingSchemeSchema>;
 
+export const AppCopySchema = z.object({
+  heroSubtitle: z.string().min(1).optional(),
+  accessSubtitle: z.string().min(1).optional(),
+  plansSubtitle: z.string().min(1).optional(),
+  byokSubtitle: z.string().min(1).optional(),
+  tokenExplanation: z.string().min(1).optional(),
+  tokenHelpUrl: z.string().url().optional(),
+  tokenHelpLabel: z.string().min(1).optional(),
+});
+
+export type AppCopy = z.infer<typeof AppCopySchema>;
+
 export const RelayMessageSchema = z.object({
   role: z.enum(["system", "user", "assistant"]),
   content: z.string().min(1),
@@ -142,6 +154,7 @@ export const AppBrandingSchema = z.object({
   legalText: z.string().min(1).optional(),
   preferredTheme: PreferredThemeSchema,
   allowedOrigins: z.array(z.string().url()),
+  copy: AppCopySchema.optional(),
 });
 
 export type AppBranding = z.infer<typeof AppBrandingSchema>;
@@ -347,6 +360,10 @@ export function parseAppRecord(value: unknown): AppRecord {
       legalText: optionalString(record(row.branding).legalText),
       preferredTheme: PreferredThemeSchema.parse(record(row.branding).preferredTheme),
       allowedOrigins: z.array(z.string().url()).parse(record(row.branding).allowedOrigins),
+      copy:
+        record(row.branding).copy === undefined
+          ? undefined
+          : AppCopySchema.parse(record(row.branding).copy),
     }),
     prices: readPrices(row.prices),
     createdAt: z.string().min(1).parse(row.createdAt),

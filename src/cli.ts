@@ -373,6 +373,13 @@ function readBrandingFlags(
   const supportUrl = readSingleFlag(args, "--support-url");
   const legalText = readSingleFlag(args, "--legal-text");
   const allowedOrigins = readRepeatedFlag(args, "--origin");
+  const heroSubtitle = readSingleFlag(args, "--hero-subtitle");
+  const accessSubtitle = readSingleFlag(args, "--access-subtitle");
+  const plansSubtitle = readSingleFlag(args, "--plans-subtitle");
+  const byokSubtitle = readSingleFlag(args, "--byok-subtitle");
+  const tokenExplanation = readSingleFlag(args, "--token-explanation");
+  const tokenHelpUrl = readSingleFlag(args, "--token-help-url");
+  const tokenHelpLabel = readSingleFlag(args, "--token-help-label");
 
   const branding: JsonRecord = {};
   if (appName) branding.appName = appName;
@@ -384,6 +391,15 @@ function readBrandingFlags(
   if (supportUrl) branding.supportUrl = supportUrl;
   if (legalText) branding.legalText = legalText;
   if (allowedOrigins.length > 0) branding.allowedOrigins = allowedOrigins;
+  const copy: JsonRecord = {};
+  if (heroSubtitle) copy.heroSubtitle = heroSubtitle;
+  if (accessSubtitle) copy.accessSubtitle = accessSubtitle;
+  if (plansSubtitle) copy.plansSubtitle = plansSubtitle;
+  if (byokSubtitle) copy.byokSubtitle = byokSubtitle;
+  if (tokenExplanation) copy.tokenExplanation = tokenExplanation;
+  if (tokenHelpUrl) copy.tokenHelpUrl = tokenHelpUrl;
+  if (tokenHelpLabel) copy.tokenHelpLabel = tokenHelpLabel;
+  if (Object.keys(copy).length > 0) branding.copy = copy;
   return branding;
 }
 
@@ -793,6 +809,13 @@ Branding Flags:
   --theme light|dark|system
   --support-url <https-url>
   --legal-text <text>
+  --hero-subtitle <text>
+  --access-subtitle <text>
+  --plans-subtitle <text>
+  --byok-subtitle <text>
+  --token-explanation <text>
+  --token-help-url <https-url>
+  --token-help-label <text>
   --origin <https-origin>   Repeatable iframe/embed allowlist
 
 How It Fits Into A Project:
@@ -824,6 +847,13 @@ Update Flags:
   --theme light|dark|system
   --support-url <https-url>
   --legal-text <text>
+  --hero-subtitle <text>
+  --access-subtitle <text>
+  --plans-subtitle <text>
+  --byok-subtitle <text>
+  --token-explanation <text>
+  --token-help-url <https-url>
+  --token-help-label <text>
   --origin <https-origin>    Repeatable iframe/embed allowlist
 
 When To Use:

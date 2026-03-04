@@ -254,6 +254,13 @@ Branding flags:
 - `--theme light|dark|system`
 - `--support-url <https-url>`
 - `--legal-text <text>`
+- `--hero-subtitle <text>` custom intro sentence in the hero section
+- `--access-subtitle <text>` custom helper text above login
+- `--plans-subtitle <text>` custom helper text above plan cards
+- `--byok-subtitle <text>` custom helper text in the BYOK key form card
+- `--token-explanation <text>` optional plain-language note shown when metered plans exist
+- `--token-help-url <https-url>` optional docs link shown next to token explanation
+- `--token-help-label <text>` optional link label (default: `Learn more`)
 - `--origin <https-origin>` (repeatable allowlist for iframe embedding)
 
 This is the main way to avoid setting up Stripe pricing in the dashboard manually.
@@ -388,6 +395,41 @@ Each app gets a hosted paywall route:
 GET /p/:appId
 ```
 
+There is also a preview route for copy/branding iteration without creating an app record:
+
+```text
+GET /preview/paywall
+```
+
+And a helper builder page with presets:
+
+```text
+GET /preview
+```
+
+`/preview` generates preview URLs for `/preview/paywall`, lets you tune copy/colors/prices, and includes a few starter presets.
+
+`/preview/paywall` accepts query params that mirror CLI branding/price flags (without the `--`), including repeatable `price`:
+
+- `name`, `app-name`, `logo-url`
+- `primary-color`, `accent-color`, `theme`
+- `support-url`, `legal-text`
+- `hero-subtitle`, `access-subtitle`, `plans-subtitle`, `byok-subtitle`
+- `token-explanation`, `token-help-url`, `token-help-label`
+- `price` (repeat): same shorthand as CLI, for example `managed:subscription:month:15:metered:1000:25`
+
+Preview-only query params:
+
+- `preview-paid=1|0` (default `1`)
+- `preview-mode=managed|byok` (default: auto)
+- `preview-email=user@example.com`
+
+Example:
+
+```text
+/preview/paywall?name=Consumer%20App&app-name=Consumer%20App&primary-color=%23145af2&accent-color=%230f172a&theme=light&plans-subtitle=Choose%20your%20plan&token-explanation=Tokens%20measure%20AI%20usage.&token-help-url=https%3A%2F%2Fexample.com%2Ftokens&token-help-label=What%20are%20tokens%3F&price=managed%3Asubscription%3Amonth%3A15%3Ametered%3A1000%3A25&price=byok%3Asubscription%3Amonth%3A700&preview-mode=byok
+```
+
 Useful query params:
 
 - `embed=1` renders a tighter iframe-friendly layout
@@ -403,6 +445,8 @@ The page uses the app's stored branding config for:
 - primary and accent colors
 - support link
 - legal footer copy
+- paywall copy text for hero/access/plans/BYOK sections
+- optional token explanation + token docs link (for metered plans)
 - preferred theme
 - allowed iframe parent origins
 
