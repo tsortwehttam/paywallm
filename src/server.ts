@@ -509,7 +509,39 @@ async function billingCheckout(
   const app = await requireApp(session.appId);
   const price = app.prices.find((entry) => entry.lookupKey === lookupKey);
 
-  if (!price?.stripePriceId) {
+  if (!price) {
+    return json(400, { error: "price_not_found" });
+  }
+
+  if (isFreeByokPrice(price)) {
+    await ddb.send(
+      new PutCommand({
+        TableName: env.tableName,
+        Item: {
+          pk: key("MEMBERSHIP", session.appId, session.email),
+          sk: key("MEMBERSHIP", session.appId, session.email),
+          gsi1pk: key("APP", session.appId),
+          gsi1sk: key("MEMBERSHIP", session.email),
+          appId: session.appId,
+          email: session.email,
+          paid: true,
+          lookupKey: price.lookupKey,
+          mode: price.mode,
+          billingType: price.type,
+          billingScheme: price.billingScheme,
+          updatedAt: nowIso(),
+        },
+      }),
+    );
+
+    return json(200, {
+      ok: true,
+      free: true,
+      lookupKey: price.lookupKey,
+    });
+  }
+
+  if (!price.stripePriceId) {
     return json(400, { error: "price_not_found" });
   }
 
@@ -1422,6 +1454,16 @@ async function createStripeBackedPrice(input: {
   stripeProductId?: string;
   price: AppPrice;
 }): Promise<AppPrice> {
+  if (isFreeByokPrice(input.price)) {
+    return {
+      ...input.price,
+      billedUnitAmountUsd: 0,
+      stripePriceId: undefined,
+      stripeMeterId: undefined,
+      meterEventName: undefined,
+    };
+  }
+
   let stripeMeterId: string | undefined;
   let meterEventName: string | undefined;
 
@@ -1657,7 +1699,7 @@ function renderPaywallHtml(input: {
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>${escapeHtml(input.app.branding.appName)} Paywall</title>
+    <title>${escapeHtml(input.app.branding.appName)}</title>
     <style>
       :root {
         --primary: ${input.app.branding.primaryColor};
@@ -1744,31 +1786,61 @@ function renderPaywallHtml(input: {
       }
       .content {
         display: grid;
-        gap: 16px;
-        padding: 20px;
+        gap: 18px;
+        padding: 20px 20px 18px;
       }
-      .card {
-        background: var(--surface);
-        border: 1px solid var(--border);
-        border-radius: 18px;
-        padding: 18px;
+      .step {
+        display: grid;
+        gap: 12px;
+        padding-bottom: 16px;
+        border-bottom: 1px solid var(--border);
       }
-      .card h2 {
-        margin: 0 0 8px;
+      .step:last-of-type {
+        border-bottom: 0;
+        padding-bottom: 0;
+      }
+      .step-head {
+        display: flex;
+        gap: 12px;
+        align-items: flex-start;
+      }
+      .step h2 {
+        margin: 0;
         font-size: 18px;
+      }
+      .step-num {
+        width: 24px;
+        height: 24px;
+        border-radius: 999px;
+        display: inline-grid;
+        place-items: center;
+        font-size: 12px;
+        font-weight: 700;
+        background: color-mix(in srgb, var(--primary) 14%, transparent);
       }
       .subtle {
         color: var(--muted);
         font-size: 14px;
       }
       .status {
-        margin-top: 12px;
-        min-height: 20px;
+        min-height: 22px;
         font-size: 14px;
+        padding: 0 2px;
       }
       .row, form {
         display: grid;
         gap: 10px;
+      }
+      .inline {
+        display: grid;
+        gap: 10px;
+        grid-template-columns: minmax(0, 1fr) auto;
+        align-items: end;
+      }
+      @media (max-width: 640px) {
+        .inline {
+          grid-template-columns: 1fr;
+        }
       }
       .split {
         display: grid;
@@ -1820,9 +1892,26 @@ function renderPaywallHtml(input: {
         display: grid;
         gap: 10px;
       }
+      .plan.active {
+        border-color: color-mix(in srgb, var(--primary) 44%, var(--border));
+        box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--primary) 28%, transparent);
+      }
       .price {
         font-size: 28px;
         font-weight: 800;
+      }
+      .byok-inline {
+        display: grid;
+        gap: 10px;
+        margin-top: 8px;
+        padding-top: 10px;
+        border-top: 1px solid var(--border);
+      }
+      .account-actions {
+        margin-top: 4px;
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
       }
       .tiny {
         font-size: 12px;
@@ -1858,7 +1947,7 @@ function renderPaywallHtml(input: {
               <h1>${escapeHtml(input.app.branding.appName)}</h1>
               <p>${escapeHtml(
                 copy?.heroSubtitle ??
-                  `You are signing into ${input.app.branding.appName}. Secure access, payment, and optional bring-your-own-key setup are handled here.`,
+                  `Sign in to ${input.app.branding.appName}.`,
               )}</p>
             </div>
           </div>
@@ -1868,68 +1957,58 @@ function renderPaywallHtml(input: {
           </div>
         </section>
         <section class="content">
-          <div class="card">
-            <h2>Access</h2>
-            <div class="subtle">${escapeHtml(copy?.accessSubtitle ?? "Use a one-time email code. This works in a browser, iframe, mobile webview, or game overlay.")}</div>
-            <div id="status" class="status" aria-live="polite"></div>
-            <form id="startForm">
+          <div id="status" class="status" aria-live="polite"></div>
+          <section class="step" id="signInStep">
+            <div class="step-head">
+              <span class="step-num">1</span>
+              <div>
+                <h2>Sign In</h2>
+                <div class="subtle">${escapeHtml(copy?.accessSubtitle ?? "Use your email to get a sign-in code.")}</div>
+              </div>
+            </div>
+            <form id="startForm" class="inline">
               <div class="row">
                 <label for="email">Email</label>
                 <input id="email" type="email" autocomplete="email" required />
               </div>
-              <button class="primary" type="submit">Send Login Code</button>
+              <button class="primary" type="submit">Send Code</button>
             </form>
-            <form id="verifyForm" class="hidden" style="margin-top:12px;">
-              <div class="split">
-                <div class="row">
-                  <label for="code">Verification Code</label>
-                  <input id="code" inputmode="numeric" pattern="[0-9]*" required />
-                </div>
-                <div class="row" style="align-content:end;">
-                  <button class="primary" type="submit">Verify And Continue</button>
-                </div>
+            <form id="verifyForm" class="hidden inline">
+              <div class="row">
+                <label for="code">Code</label>
+                <input id="code" inputmode="numeric" pattern="[0-9]*" required />
               </div>
+              <button class="primary" type="submit">Verify</button>
             </form>
-          </div>
-          <div class="card hidden" id="accountCard">
-            <h2>Account</h2>
-            <div id="accountSummary" class="subtle"></div>
-            <div class="hero-actions" style="margin-top:14px;">
-              <button class="secondary" id="refreshButton" type="button">Refresh</button>
+            <div id="signedInNote" class="hidden subtle"></div>
+          </section>
+          <section class="step hidden" id="plansStep">
+            <div class="step-head">
+              <span class="step-num">2</span>
+              <div>
+                <h2>Choose Plan</h2>
+                <div class="subtle">${escapeHtml(copy?.plansSubtitle ?? "Pick the plan that matches how you want to pay.")}</div>
+              </div>
+            </div>
+            <div id="plans" class="plans"></div>
+            ${tokenHelpHtml}
+          </section>
+          <section class="step hidden" id="accountStep">
+            <div class="step-head">
+              <span class="step-num">3</span>
+              <div>
+                <h2>Finish</h2>
+                <div id="accountSummary" class="subtle"></div>
+              </div>
+            </div>
+            <div class="account-actions">
               <button class="secondary" id="portalButton" type="button">Manage Billing</button>
               <button class="secondary" id="logoutButton" type="button">Log Out</button>
             </div>
-          </div>
-          <div class="card">
-            <h2>Plans</h2>
-            <div class="subtle">${escapeHtml(copy?.plansSubtitle ?? `Choose the tier that matches how you want to use ${input.app.branding.appName}.`)}</div>
-            <div id="plans" class="plans" style="margin-top:14px;"></div>
-            ${tokenHelpHtml}
-          </div>
-          <div class="card hidden" id="byokCard">
-            <h2>Bring Your Own Key</h2>
-            <div class="subtle">${escapeHtml(copy?.byokSubtitle ?? "If your plan allows BYOK, save your provider key here so requests run against your own account.")}</div>
-            <form id="byokForm" style="margin-top:12px;">
-              <div class="split">
-                <div class="row">
-                  <label for="provider">Provider</label>
-                  <select id="provider">
-                    <option value="openai">OpenAI</option>
-                    <option value="anthropic">Anthropic</option>
-                    <option value="openrouter">OpenRouter</option>
-                  </select>
-                </div>
-                <div class="row">
-                  <label for="apiKey">API Key</label>
-                  <input id="apiKey" type="password" autocomplete="off" required />
-                </div>
-              </div>
-              <button class="primary" type="submit">Save Provider Key</button>
-            </form>
-          </div>
+          </section>
           <div class="trust">
-            <span class="pill">Secure checkout powered by Paywallm</span>
-            <span class="pill">Auth, billing, and access stay scoped to ${escapeHtml(input.app.branding.appName)}</span>
+            <span class="pill">Secure checkout</span>
+            <span class="pill">Payments handled by Stripe</span>
             ${input.app.branding.legalText ? `<span>${escapeHtml(input.app.branding.legalText)}</span>` : ""}
           </div>
         </section>
@@ -1947,14 +2026,15 @@ function renderPaywallHtml(input: {
       const statusNode = document.getElementById("status");
       const startForm = document.getElementById("startForm");
       const verifyForm = document.getElementById("verifyForm");
-      const accountCard = document.getElementById("accountCard");
+      const signedInNote = document.getElementById("signedInNote");
+      const plansStep = document.getElementById("plansStep");
+      const accountStep = document.getElementById("accountStep");
       const accountSummary = document.getElementById("accountSummary");
       const plansNode = document.getElementById("plans");
-      const byokCard = document.getElementById("byokCard");
       const emailInput = document.getElementById("email");
       const codeInput = document.getElementById("code");
-      const providerInput = document.getElementById("provider");
-      const apiKeyInput = document.getElementById("apiKey");
+      const portalButton = document.getElementById("portalButton");
+      const logoutButton = document.getElementById("logoutButton");
 
       document.documentElement.dataset.theme = bootstrap.branding.preferredTheme;
       emailInput.value = state.email;
@@ -2002,6 +2082,9 @@ function renderPaywallHtml(input: {
       }
 
       function formatPrice(price) {
+        if (price.mode === "byok" && price.type === "one_time" && price.billingScheme === "flat" && price.unitAmountUsd === 0) {
+          return "Free";
+        }
         const amount =
           typeof price.billedUnitAmountUsd === "number"
             ? price.billedUnitAmountUsd
@@ -2020,11 +2103,20 @@ function renderPaywallHtml(input: {
 
       function renderPlans() {
         plansNode.innerHTML = "";
+        const membership = state.me && state.me.membership;
         for (const price of bootstrap.prices) {
           const plan = document.createElement("div");
           plan.className = "plan";
+          const isActivePlan = Boolean(
+            membership &&
+            membership.paid &&
+            membership.lookupKey === price.lookupKey,
+          );
+          if (isActivePlan) {
+            plan.classList.add("active");
+          }
           const title = document.createElement("div");
-          title.innerHTML = "<strong>" + escapeHtmlJs(price.mode === "byok" ? "Bring Your Own Key" : "Managed Access") + "</strong>";
+          title.innerHTML = "<strong>" + escapeHtmlJs(price.mode === "byok" ? "Use Your Own Key" : "All Included") + "</strong>";
           const amount = document.createElement("div");
           amount.className = "price";
           amount.textContent = formatPrice(price);
@@ -2032,32 +2124,100 @@ function renderPaywallHtml(input: {
           meta.className = "tiny";
           meta.textContent =
             price.billingScheme === "metered"
-              ? "Usage-based managed billing"
+              ? "Pay for what you use"
               : price.type === "subscription"
-                ? "Recurring access"
-                : "Single unlock";
+                ? "Billed automatically"
+                : "One-time payment";
           const button = document.createElement("button");
           button.className = "primary";
           button.type = "button";
-          button.textContent = "Choose Plan";
+          button.textContent = isActivePlan ? "Selected" : "Select";
+          button.disabled = isActivePlan;
           button.addEventListener("click", () => startCheckout(price.lookupKey));
+
           plan.append(title, amount, meta, button);
+
+          const isActiveByok = Boolean(isActivePlan && membership && membership.mode === "byok");
+          if (price.mode === "byok") {
+            const byokMessage = document.createElement("div");
+            byokMessage.className = "tiny";
+            byokMessage.textContent = isActiveByok
+              ? (bootstrap.branding.copy && bootstrap.branding.copy.byokSubtitle) || "Add your provider key below."
+              : "After selecting BYOK, you will add your provider key here.";
+            plan.appendChild(byokMessage);
+          }
+
+          if (isActiveByok) {
+            const form = document.createElement("form");
+            form.className = "byok-inline";
+            form.innerHTML =
+              '<div class="split">' +
+                '<div class="row">' +
+                  "<label>Provider</label>" +
+                  '<select name="provider">' +
+                    '<option value="openai">OpenAI</option>' +
+                    '<option value="anthropic">Anthropic</option>' +
+                    '<option value="openrouter">OpenRouter</option>' +
+                  "</select>" +
+                "</div>" +
+                '<div class="row">' +
+                  "<label>API Key</label>" +
+                  '<input name="apiKey" type="password" autocomplete="off" required />' +
+                "</div>" +
+              "</div>" +
+              '<button class="primary" type="submit">Save Key</button>';
+            form.addEventListener("submit", async (event) => {
+              event.preventDefault();
+              const providerInput = form.querySelector("select[name=provider]");
+              const apiKeyInput = form.querySelector("input[name=apiKey]");
+              if (!providerInput || !apiKeyInput) return;
+              try {
+                await api("/v1/apps/" + encodeURIComponent(bootstrap.appId) + "/keys", "POST", {
+                  provider: providerInput.value,
+                  apiKey: apiKeyInput.value.trim(),
+                }, true);
+                apiKeyInput.value = "";
+                setStatus("API key saved.", false);
+              } catch (error) {
+                setStatus(error.message || "Couldn't save your key. Please try again.", true);
+              }
+            });
+            plan.appendChild(form);
+          }
           plansNode.appendChild(plan);
         }
       }
 
       function renderAccount() {
         const membership = state.me && state.me.membership;
+        const signedIn = Boolean(state.me);
         const paid = Boolean(membership && membership.paid);
-        accountCard.classList.toggle("hidden", !state.me);
-        byokCard.classList.toggle("hidden", !(paid && membership && membership.mode === "byok"));
-        if (!state.me) return;
-        const summary = [
-          "Signed in as " + state.me.email,
-          paid ? "Access active" : "Access not paid yet",
-          membership && membership.mode ? "Mode: " + membership.mode : "",
-        ].filter(Boolean).join(" • ");
-        accountSummary.textContent = summary;
+        startForm.classList.toggle("hidden", signedIn);
+        verifyForm.classList.toggle("hidden", !state.email || signedIn);
+        signedInNote.classList.toggle("hidden", !signedIn);
+        plansStep.classList.toggle("hidden", !signedIn);
+        accountStep.classList.toggle("hidden", !signedIn);
+
+        if (!signedIn) {
+          accountSummary.textContent = "";
+          portalButton.classList.add("hidden");
+          renderPlans();
+          return;
+        }
+
+        signedInNote.textContent = "Signed in as " + state.me.email + ".";
+        if (!paid) {
+          accountSummary.textContent = "No active plan yet. Choose one above to continue.";
+          portalButton.classList.add("hidden");
+        } else if (membership.mode === "byok") {
+          accountSummary.textContent = "BYOK plan is active. Add your API key in the BYOK plan card above.";
+          portalButton.classList.toggle("hidden", !membership.stripeCustomerId);
+        } else {
+          accountSummary.textContent = "All Included plan is active. You are ready to use the app.";
+          portalButton.classList.toggle("hidden", !membership.stripeCustomerId);
+        }
+
+        renderPlans();
       }
 
       async function loadMe() {
@@ -2069,7 +2229,14 @@ function renderPaywallHtml(input: {
         try {
           state.me = await api("/me", "GET", undefined, true);
           renderAccount();
-          setStatus("");
+          const membership = state.me && state.me.membership;
+          if (!membership || !membership.paid) {
+            setStatus("Signed in. Step 2: choose a plan.", false);
+          } else if (membership.mode === "byok") {
+            setStatus("Plan active. Step 3: add your API key in the BYOK plan card.", false);
+          } else {
+            setStatus("Plan active. You are all set.", false);
+          }
           emit("auth_success", { email: state.me.email, membership: state.me.membership || null });
         } catch (error) {
           sessionStorage.removeItem(storageKey);
@@ -2085,6 +2252,11 @@ function renderPaywallHtml(input: {
           if (bootstrap.successUrl) payload.successUrl = bootstrap.successUrl;
           if (bootstrap.cancelUrl) payload.cancelUrl = bootstrap.cancelUrl;
           const result = await api("/billing/checkout", "POST", payload, true);
+          if (result && result.free) {
+            await loadMe();
+            setStatus("Free BYOK access enabled. Add your provider key to continue.", false);
+            return;
+          }
           emit("checkout_started", { lookupKey, sessionId: result.sessionId || "" });
           if (bootstrap.embed && window.top && window.top !== window) {
             window.top.location.href = result.url;
@@ -2092,8 +2264,8 @@ function renderPaywallHtml(input: {
           }
           window.location.href = result.url;
         } catch (error) {
-          setStatus(error.message || "Unable to start checkout.", true);
-          emit("error", { message: error.message || "Unable to start checkout." });
+          setStatus(error.message || "Something went wrong. Please try again.", true);
+          emit("error", { message: error.message || "Something went wrong. Please try again." });
         }
       }
 
@@ -2103,10 +2275,10 @@ function renderPaywallHtml(input: {
         try {
           await api("/auth/start", "POST", { appId: bootstrap.appId, email: state.email }, false);
           verifyForm.classList.remove("hidden");
-          setStatus("Verification code sent. Check your inbox.", false);
+          setStatus("Code sent. Check your email.", false);
           emit("ready", { appId: bootstrap.appId });
         } catch (error) {
-          setStatus(error.message || "Unable to send login code.", true);
+          setStatus(error.message || "Something went wrong. Please try again.", true);
         }
       });
 
@@ -2122,45 +2294,34 @@ function renderPaywallHtml(input: {
           sessionStorage.setItem(storageKey, state.token);
           await loadMe();
         } catch (error) {
-          setStatus(error.message || "Unable to verify code.", true);
+          setStatus(error.message || "That code didn't work. Please try again.", true);
         }
       });
 
-      document.getElementById("refreshButton").addEventListener("click", () => loadMe());
-      document.getElementById("logoutButton").addEventListener("click", async () => {
+      logoutButton.addEventListener("click", async () => {
         try {
           await api("/auth/logout", "POST", {}, true);
         } finally {
           state.token = "";
           state.me = null;
           sessionStorage.removeItem(storageKey);
+          state.email = "";
+          emailInput.value = "";
+          codeInput.value = "";
+          verifyForm.classList.add("hidden");
           renderAccount();
           setStatus("Logged out.", false);
         }
       });
 
-      document.getElementById("portalButton").addEventListener("click", async () => {
+      portalButton.addEventListener("click", async () => {
         try {
           const payload = {};
           if (bootstrap.returnUrl) payload.returnUrl = bootstrap.returnUrl;
           const result = await api("/billing/portal", "POST", payload, true);
           window.location.href = result.url;
         } catch (error) {
-          setStatus(error.message || "Unable to open billing portal.", true);
-        }
-      });
-
-      document.getElementById("byokForm").addEventListener("submit", async (event) => {
-        event.preventDefault();
-        try {
-          await api("/v1/apps/" + encodeURIComponent(bootstrap.appId) + "/keys", "POST", {
-            provider: providerInput.value,
-            apiKey: apiKeyInput.value.trim(),
-          }, true);
-          apiKeyInput.value = "";
-          setStatus("Provider key saved.", false);
-        } catch (error) {
-          setStatus(error.message || "Unable to save provider key.", true);
+          setStatus(error.message || "Something went wrong. Please try again.", true);
         }
       });
 
@@ -2205,7 +2366,7 @@ function renderPaywallHtml(input: {
           },
         };
         renderAccount();
-        setStatus("Preview mode: auth, checkout, and key-save actions are disabled.", false);
+        setStatus("This is a preview. Actions are disabled.", false);
         emit("ready", { appId: bootstrap.appId, height: document.documentElement.scrollHeight, preview: true });
         emit("resize", { height: document.documentElement.scrollHeight });
       } else {
@@ -2732,6 +2893,15 @@ function billedUnitAmount(price: AppPrice): number {
   const premiumPercent = price.billingPremiumPercent ?? 0;
   const multiplier = 1 + premiumPercent / 100;
   return Math.ceil(price.unitAmountUsd * multiplier);
+}
+
+function isFreeByokPrice(price: AppPrice): boolean {
+  return (
+    price.mode === "byok" &&
+    price.type === "one_time" &&
+    price.billingScheme === "flat" &&
+    price.unitAmountUsd === 0
+  );
 }
 
 function toFiniteNumber(value: unknown): number | undefined {

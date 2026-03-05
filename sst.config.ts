@@ -1,27 +1,8 @@
-import "dotenv/config";
-
 declare const $config: (config: {
   app: (input?: { stage?: string }) => Record<string, unknown>;
   run: () => Promise<Record<string, unknown>>;
 }) => unknown;
 declare const sst: any;
-
-const required = [
-  "AWS_REGION",
-  "AWS_ACCOUNT_ID",
-  "AWS_KMS_KEY_ID",
-  "STRIPE_SECRET_KEY",
-  "STRIPE_WEBHOOK_SECRET",
-  "STRIPE_SUCCESS_URL",
-  "STRIPE_CANCEL_URL",
-  "SES_FROM_EMAIL",
-] as const;
-
-for (const key of required) {
-  if (!process.env[key]) {
-    throw new Error(`Missing required env var in .env: ${key}`);
-  }
-}
 
 export default $config({
   app(input?: { stage?: string }) {
@@ -32,13 +13,30 @@ export default $config({
     };
   },
   async run() {
+    await import("dotenv/config");
+    const required = [
+      "AWS_REGION",
+      "AWS_ACCOUNT_ID",
+      "AWS_KMS_KEY_ID",
+      "STRIPE_SECRET_KEY",
+      "STRIPE_WEBHOOK_SECRET",
+      "STRIPE_SUCCESS_URL",
+      "STRIPE_CANCEL_URL",
+      "SES_FROM_EMAIL",
+    ] as const;
+
+    for (const key of required) {
+      if (!process.env[key]) {
+        throw new Error(`Missing required env var in .env: ${key}`);
+      }
+    }
+
     const table = new sst.aws.Dynamo("PaywallTable", {
       fields: {
         pk: "string",
         sk: "string",
         gsi1pk: "string",
         gsi1sk: "string",
-        ttl: "number",
       },
       primaryIndex: {
         hashKey: "pk",
@@ -73,7 +71,6 @@ export default $config({
       ],
       environment: {
         TABLE_NAME: table.name,
-        AWS_REGION: process.env.AWS_REGION!,
         AWS_ACCOUNT_ID: process.env.AWS_ACCOUNT_ID!,
         AWS_KMS_KEY_ID: process.env.AWS_KMS_KEY_ID!,
         STRIPE_SECRET_KEY: process.env.STRIPE_SECRET_KEY!,
@@ -92,6 +89,8 @@ export default $config({
 
     const publicRoutes = [
       "OPTIONS /{proxy+}",
+      "GET /preview",
+      "GET /preview/paywall",
       "GET /p/{appId}",
       "POST /auth/start",
       "POST /auth/verify",

@@ -56,6 +56,22 @@ test("parseCliPriceFlag parses one-time pricing", () => {
   });
 });
 
+test("parseCliPriceFlag parses free byok pricing", () => {
+  assert.deepEqual(parseCliPriceFlag("byok:one_time:-:0"), {
+    lookupKey: "byok_one_time_one_time_0",
+    mode: "byok",
+    type: "one_time",
+    billingScheme: "flat",
+    interval: undefined,
+    unitAmountUsd: 0,
+    billedUnitAmountUsd: undefined,
+    meterValueName: undefined,
+    meterAggregationKey: undefined,
+    includedUsageUnits: undefined,
+    billingPremiumPercent: undefined,
+  });
+});
+
 test("parseCliPriceFlag parses metered managed subscription pricing", () => {
   assert.deepEqual(parseCliPriceFlag("managed:subscription:month:15:metered:1000"), {
     lookupKey: "managed_subscription_month_15",

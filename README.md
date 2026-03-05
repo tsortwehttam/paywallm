@@ -234,6 +234,7 @@ Examples:
 
 - `--price byok:subscription:month:500`
 - `--price managed:subscription:year:12000`
+- `--price byok:one_time:-:0` (free BYOK: no Stripe checkout, user must add API key)
 - `--price byok:one_time:-:1999`
 - `--price managed:one_time:-:4999`
 - `--price managed:subscription:month:15:metered:1000`
@@ -242,7 +243,8 @@ Examples:
 Behavior:
 
 - creates one Stripe Product for the app
-- creates one Stripe Price for each `--price`
+- creates one Stripe Price for each paid `--price`
+- `byok:one_time:-:0` is treated as a free BYOK entitlement and skips Stripe checkout
 - stores the Stripe IDs and paywall branding inside the app record in DynamoDB
 
 Branding flags:

@@ -825,6 +825,7 @@ How It Fits Into A Project:
 
 Examples:
   paywallm add-app game-a "Game A" --price managed:subscription:month:1500
+  paywallm add-app game-a "Game A" --price byok:one_time:-:0
   paywallm add-app game-a "Game A" --prices-file ./prices.json --origin https://game-a.example.com
 `);
 }
