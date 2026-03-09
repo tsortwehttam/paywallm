@@ -17,6 +17,8 @@ export const AppCopySchema = z.object({
   accessSubtitle: z.string().min(1).optional(),
   plansSubtitle: z.string().min(1).optional(),
   byokSubtitle: z.string().min(1).optional(),
+  managedSubscriptionLabel: z.string().min(1).optional(),
+  byokSubscriptionLabel: z.string().min(1).optional(),
   tokenExplanation: z.string().min(1).optional(),
   tokenHelpUrl: z.string().url().optional(),
   tokenHelpLabel: z.string().min(1).optional(),
@@ -41,12 +43,14 @@ export const AppPriceSchema = z
     billedUnitAmountUsd: z.number().nonnegative().optional(),
     interval: z.enum(["month", "year"]).optional(),
     stripePriceId: z.string().min(1).optional(),
+    stripeBasePriceId: z.string().min(1).optional(),
     meterEventName: z.string().min(1).optional(),
     stripeMeterId: z.string().min(1).optional(),
     meterValueName: z.string().min(1).optional(),
     meterAggregationKey: z.string().min(1).optional(),
     includedUsageUnits: z.number().int().positive().optional(),
     billingPremiumPercent: z.number().nonnegative().max(500).optional(),
+    baseSubscriptionAmountUsd: z.number().int().nonnegative().optional(),
   })
   .superRefine((value, ctx) => {
     if (value.type === "subscription" && !value.interval) {
@@ -102,6 +106,14 @@ export const AppPriceSchema = z
         code: z.ZodIssueCode.custom,
         message: "flat prices must not include billingPremiumPercent",
         path: ["billingPremiumPercent"],
+      });
+    }
+
+    if (value.billingScheme === "flat" && value.baseSubscriptionAmountUsd !== undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "flat prices must not include baseSubscriptionAmountUsd",
+        path: ["baseSubscriptionAmountUsd"],
       });
     }
   });
@@ -251,7 +263,8 @@ export function buildLookupKey(input: {
 }
 
 export function parseCliPriceFlag(input: string): AppPrice {
-  const [mode, type, intervalRaw, amountRaw, billingSchemeRaw, usageUnitsRaw, premiumPercentRaw] = input.split(":");
+  const [mode, type, intervalRaw, amountRaw, billingSchemeRaw, usageUnitsRaw, premiumPercentRaw, baseAmountRaw] =
+    input.split(":");
   if (!mode || !type || !intervalRaw || !amountRaw) {
     throw new Error(`Invalid --price format: ${input}`);
   }
@@ -275,14 +288,25 @@ export function parseCliPriceFlag(input: string): AppPrice {
       : Number.isFinite(Number(premiumPercentRaw)) && Number(premiumPercentRaw) >= 0
         ? Number(premiumPercentRaw)
         : Number.NaN;
+  const baseSubscriptionAmountUsd =
+    baseAmountRaw === undefined || baseAmountRaw === "-"
+      ? undefined
+      : Number.isFinite(Number(baseAmountRaw)) && Number(baseAmountRaw) >= 0
+        ? Number(baseAmountRaw)
+        : Number.NaN;
+  const lookupKeyBase = buildLookupKey({
+    mode,
+    type,
+    interval,
+    amountCents,
+  });
+  const lookupKey =
+    billingScheme === "metered" && baseSubscriptionAmountUsd !== undefined
+      ? `${lookupKeyBase}_base_${baseSubscriptionAmountUsd}`
+      : lookupKeyBase;
 
   return AppPriceSchema.parse({
-    lookupKey: buildLookupKey({
-      mode,
-      type,
-      interval,
-      amountCents,
-    }),
+    lookupKey,
     mode,
     type,
     billingScheme,
@@ -293,6 +317,7 @@ export function parseCliPriceFlag(input: string): AppPrice {
     meterValueName: billingScheme === "metered" ? "tokens" : undefined,
     meterAggregationKey: billingScheme === "metered" ? "llm_total_tokens" : undefined,
     billingPremiumPercent,
+    ...(billingScheme === "metered" && baseSubscriptionAmountUsd !== undefined ? { baseSubscriptionAmountUsd } : {}),
   });
 }
 
@@ -304,7 +329,7 @@ export function readPrices(value: unknown): AppPrice[] {
   return value.map((entry) => {
     const row = z.record(z.string(), z.unknown()).parse(entry);
     const type = BillingTypeSchema.parse(row.type);
-    const normalized = {
+    const normalizedBase = {
       lookupKey: z.string().min(1).parse(row.lookupKey),
       mode: ModeSchema.parse(row.mode),
       type,
@@ -321,23 +346,28 @@ export function readPrices(value: unknown): AppPrice[] {
             ? "month"
             : undefined
           : z.enum(["month", "year"]).parse(row.interval),
-      stripePriceId: row.stripePriceId === undefined ? undefined : z.string().min(1).parse(row.stripePriceId),
-      meterEventName: row.meterEventName === undefined ? undefined : z.string().min(1).parse(row.meterEventName),
-      stripeMeterId: row.stripeMeterId === undefined ? undefined : z.string().min(1).parse(row.stripeMeterId),
-      meterValueName: row.meterValueName === undefined ? undefined : z.string().min(1).parse(row.meterValueName),
-      meterAggregationKey:
-        row.meterAggregationKey === undefined ? undefined : z.string().min(1).parse(row.meterAggregationKey),
-      includedUsageUnits:
-        row.includedUsageUnits === undefined
-          ? undefined
-          : z.number().int().positive().parse(toNumber(row.includedUsageUnits)),
-      billingPremiumPercent:
-        row.billingPremiumPercent === undefined
-          ? undefined
-          : z.number().nonnegative().max(500).parse(toNumber(row.billingPremiumPercent)),
+      ...(row.stripePriceId === undefined ? {} : { stripePriceId: z.string().min(1).parse(row.stripePriceId) }),
+      ...(row.stripeBasePriceId === undefined
+        ? {}
+        : { stripeBasePriceId: z.string().min(1).parse(row.stripeBasePriceId) }),
+      ...(row.meterEventName === undefined ? {} : { meterEventName: z.string().min(1).parse(row.meterEventName) }),
+      ...(row.stripeMeterId === undefined ? {} : { stripeMeterId: z.string().min(1).parse(row.stripeMeterId) }),
+      ...(row.meterValueName === undefined ? {} : { meterValueName: z.string().min(1).parse(row.meterValueName) }),
+      ...(row.meterAggregationKey === undefined
+        ? {}
+        : { meterAggregationKey: z.string().min(1).parse(row.meterAggregationKey) }),
+      ...(row.includedUsageUnits === undefined
+        ? {}
+        : { includedUsageUnits: z.number().int().positive().parse(toNumber(row.includedUsageUnits)) }),
+      ...(row.billingPremiumPercent === undefined
+        ? {}
+        : { billingPremiumPercent: z.number().nonnegative().max(500).parse(toNumber(row.billingPremiumPercent)) }),
+      ...(row.baseSubscriptionAmountUsd === undefined
+        ? {}
+        : { baseSubscriptionAmountUsd: z.number().int().nonnegative().parse(toNumber(row.baseSubscriptionAmountUsd)) }),
     };
 
-    return AppPriceSchema.parse(normalized);
+    return AppPriceSchema.parse(normalizedBase);
   });
 }
 

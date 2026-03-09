@@ -404,6 +404,8 @@ async function paywallPreviewPage(
   const accessSubtitle = previewParam(params, "access-subtitle");
   const plansSubtitle = previewParam(params, "plans-subtitle");
   const byokSubtitle = previewParam(params, "byok-subtitle");
+  const managedSubscriptionLabel = previewParam(params, "managed-subscription-label");
+  const byokSubscriptionLabel = previewParam(params, "byok-subscription-label");
   const tokenExplanation = previewParam(params, "token-explanation");
   const tokenHelpUrl = previewParam(params, "token-help-url");
   const tokenHelpLabel = previewParam(params, "token-help-label");
@@ -411,6 +413,8 @@ async function paywallPreviewPage(
   if (accessSubtitle) copy.accessSubtitle = accessSubtitle;
   if (plansSubtitle) copy.plansSubtitle = plansSubtitle;
   if (byokSubtitle) copy.byokSubtitle = byokSubtitle;
+  if (managedSubscriptionLabel) copy.managedSubscriptionLabel = managedSubscriptionLabel;
+  if (byokSubscriptionLabel) copy.byokSubscriptionLabel = byokSubscriptionLabel;
   if (tokenExplanation) copy.tokenExplanation = tokenExplanation;
   if (tokenHelpUrl) copy.tokenHelpUrl = tokenHelpUrl;
   if (tokenHelpLabel) copy.tokenHelpLabel = tokenHelpLabel;
@@ -542,19 +546,29 @@ async function billingCheckout(
     return json(400, { error: "price_not_found" });
   }
 
-  const lineItem: Stripe.Checkout.SessionCreateParams.LineItem = {
-    price: price.stripePriceId,
-  };
-
-  if (price.billingScheme !== "metered") {
-    lineItem.quantity = 1;
+  const lineItems: Stripe.Checkout.SessionCreateParams.LineItem[] = [];
+  if (price.billingScheme === "metered") {
+    lineItems.push({
+      price: price.stripePriceId,
+    });
+    if (price.stripeBasePriceId) {
+      lineItems.push({
+        price: price.stripeBasePriceId,
+        quantity: 1,
+      });
+    }
+  } else {
+    lineItems.push({
+      price: price.stripePriceId,
+      quantity: 1,
+    });
   }
 
   const checkout = await stripe.checkout.sessions.create({
     mode: price.type === "subscription" ? "subscription" : "payment",
     success_url: successUrl,
     cancel_url: cancelUrl,
-    line_items: [lineItem],
+    line_items: lineItems,
     metadata: {
       appId: session.appId,
       email: session.email,
@@ -1433,8 +1447,8 @@ function readPreviewPrices(params: URLSearchParams): AppPrice[] {
   const specs = params.getAll("price");
   if (specs.length === 0) {
     return [
-      parseCliPriceFlag("managed:subscription:month:999"),
-      parseCliPriceFlag("byok:subscription:month:499"),
+      parseCliPriceFlag("managed:subscription:month:15:metered:1000:25:1299"),
+      parseCliPriceFlag("byok:subscription:month:700"),
     ];
   }
 
@@ -1468,6 +1482,9 @@ function parseAppBranding(
     accessSubtitle: textOrUndefined(copyRow.accessSubtitle) ?? existing?.copy?.accessSubtitle,
     plansSubtitle: textOrUndefined(copyRow.plansSubtitle) ?? existing?.copy?.plansSubtitle,
     byokSubtitle: textOrUndefined(copyRow.byokSubtitle) ?? existing?.copy?.byokSubtitle,
+    managedSubscriptionLabel:
+      textOrUndefined(copyRow.managedSubscriptionLabel) ?? existing?.copy?.managedSubscriptionLabel,
+    byokSubscriptionLabel: textOrUndefined(copyRow.byokSubscriptionLabel) ?? existing?.copy?.byokSubscriptionLabel,
     tokenExplanation: textOrUndefined(copyRow.tokenExplanation) ?? existing?.copy?.tokenExplanation,
     tokenHelpUrl: textOrUndefined(copyRow.tokenHelpUrl) ?? existing?.copy?.tokenHelpUrl,
     tokenHelpLabel: textOrUndefined(copyRow.tokenHelpLabel) ?? existing?.copy?.tokenHelpLabel,
@@ -1522,6 +1539,7 @@ async function createStripeBackedPrice(input: {
 
   let stripeMeterId: string | undefined;
   let meterEventName: string | undefined;
+  let stripeBasePriceId: string | undefined;
 
   if (input.price.billingScheme === "metered") {
     const meter = await stripe.billing.meters.create({
@@ -1570,12 +1588,40 @@ async function createStripeBackedPrice(input: {
       billingScheme: input.price.billingScheme,
       includedUsageUnits: String(input.price.includedUsageUnits ?? ""),
       billingPremiumPercent: String(input.price.billingPremiumPercent ?? ""),
+      baseSubscriptionAmountUsd: String(input.price.baseSubscriptionAmountUsd ?? ""),
     },
   });
+
+  if (
+    input.price.type === "subscription" &&
+    input.price.billingScheme === "metered" &&
+    typeof input.price.baseSubscriptionAmountUsd === "number" &&
+    input.price.baseSubscriptionAmountUsd > 0
+  ) {
+    const basePrice = await stripe.prices.create({
+      product: input.stripeProductId,
+      unit_amount: input.price.baseSubscriptionAmountUsd,
+      currency: "usd",
+      recurring: {
+        interval: input.price.interval ?? "month",
+        usage_type: "licensed",
+      },
+      metadata: {
+        appId: input.appId,
+        lookupKey: input.price.lookupKey,
+        mode: input.price.mode,
+        billingType: input.price.type,
+        billingScheme: input.price.billingScheme,
+        role: "base_subscription",
+      },
+    });
+    stripeBasePriceId = basePrice.id;
+  }
 
   return {
     ...input.price,
     stripePriceId: stripePrice.id,
+    stripeBasePriceId,
     billedUnitAmountUsd: billedUnitAmount(input.price),
     stripeMeterId,
     meterEventName,
@@ -2110,7 +2156,11 @@ function renderPaywallHtml(input: {
               : 0;
         const dollars = "$" + (amount / 100).toFixed(2);
         if (price.billingScheme === "metered" && price.includedUsageUnits) {
-          return dollars + " per " + price.includedUsageUnits.toLocaleString() + " tokens";
+          const usagePart = dollars + " per " + price.includedUsageUnits.toLocaleString() + " tokens";
+          if (typeof price.baseSubscriptionAmountUsd === "number" && price.baseSubscriptionAmountUsd > 0) {
+            return usagePart + " + $" + (price.baseSubscriptionAmountUsd / 100).toFixed(2) + "/" + (price.interval || "month");
+          }
+          return usagePart;
         }
         if (price.type === "subscription") {
           return dollars + "/" + (price.interval || "month");
@@ -2139,12 +2189,16 @@ function renderPaywallHtml(input: {
           amount.textContent = formatPrice(price);
           const meta = document.createElement("div");
           meta.className = "tiny";
-          meta.textContent =
-            price.billingScheme === "metered"
-              ? "Pay for what you use"
-              : price.type === "subscription"
-                ? "Billed automatically"
-                : "One-time payment";
+          if (price.billingScheme === "metered") {
+            meta.textContent = "Pay for what you use";
+          } else if (price.type === "subscription") {
+            meta.textContent =
+              price.mode === "byok"
+                ? (bootstrap.branding.copy && bootstrap.branding.copy.byokSubscriptionLabel) || "Billed automatically"
+                : (bootstrap.branding.copy && bootstrap.branding.copy.managedSubscriptionLabel) || "Billed automatically";
+          } else {
+            meta.textContent = "One-time payment";
+          }
           const button = document.createElement("button");
           button.className = "primary";
           button.type = "button";
@@ -2550,6 +2604,8 @@ function renderPaywallBuilderHtml(pathname: string): string {
           <div class="row"><label for="accessSubtitle">access-subtitle</label><input id="accessSubtitle" /></div>
           <div class="row"><label for="plansSubtitle">plans-subtitle</label><input id="plansSubtitle" /></div>
           <div class="row"><label for="byokSubtitle">byok-subtitle</label><input id="byokSubtitle" /></div>
+          <div class="row"><label for="managedSubscriptionLabel">managed-subscription-label</label><input id="managedSubscriptionLabel" /></div>
+          <div class="row"><label for="byokSubscriptionLabel">byok-subscription-label</label><input id="byokSubscriptionLabel" /></div>
           <div class="row"><label for="tokenExplanation">token-explanation</label><input id="tokenExplanation" /></div>
           <div class="row"><label for="tokenHelpUrl">token-help-url</label><input id="tokenHelpUrl" placeholder="https://..." /></div>
           <div class="row"><label for="tokenHelpLabel">token-help-label</label><input id="tokenHelpLabel" /></div>
@@ -2597,6 +2653,8 @@ function renderPaywallBuilderHtml(pathname: string): string {
         accessSubtitle: document.getElementById("accessSubtitle"),
         plansSubtitle: document.getElementById("plansSubtitle"),
         byokSubtitle: document.getElementById("byokSubtitle"),
+        managedSubscriptionLabel: document.getElementById("managedSubscriptionLabel"),
+        byokSubscriptionLabel: document.getElementById("byokSubscriptionLabel"),
         tokenExplanation: document.getElementById("tokenExplanation"),
         tokenHelpUrl: document.getElementById("tokenHelpUrl"),
         tokenHelpLabel: document.getElementById("tokenHelpLabel"),
@@ -2623,10 +2681,12 @@ function renderPaywallBuilderHtml(pathname: string): string {
         accessSubtitle: "",
         plansSubtitle: "",
         byokSubtitle: "",
+        managedSubscriptionLabel: "",
+        byokSubscriptionLabel: "",
         tokenExplanation: "",
         tokenHelpUrl: "",
         tokenHelpLabel: "",
-        prices: "managed:subscription:month:999\\nbyok:subscription:month:499",
+        prices: "managed:subscription:month:15:metered:1000:25:1299\\nbyok:subscription:month:700",
         previewMode: "",
         previewEmail: "preview@example.com",
         previewPaid: true,
@@ -2709,6 +2769,8 @@ function renderPaywallBuilderHtml(pathname: string): string {
         add("access-subtitle", fields.accessSubtitle.value);
         add("plans-subtitle", fields.plansSubtitle.value);
         add("byok-subtitle", fields.byokSubtitle.value);
+        add("managed-subscription-label", fields.managedSubscriptionLabel.value);
+        add("byok-subscription-label", fields.byokSubscriptionLabel.value);
         add("token-explanation", fields.tokenExplanation.value);
         add("token-help-url", fields.tokenHelpUrl.value);
         add("token-help-label", fields.tokenHelpLabel.value);

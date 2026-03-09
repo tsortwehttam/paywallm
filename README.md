@@ -194,7 +194,8 @@ Example `prices.json`:
     "amountCents": 15,
     "billingScheme": "metered",
     "includedUsageUnits": 1000,
-    "billingPremiumPercent": 25
+    "billingPremiumPercent": 25,
+    "baseSubscriptionAmountUsd": 1299
   }
 ]
 ```
@@ -214,7 +215,7 @@ The structured file format is the recommended path because each field is explici
 Shorthand is still supported for quick one-off setup:
 
 ```text
---price <mode>:<type>:<intervalOrDash>:<amountCents>[:<flatOrMetered>[:<includedUsageUnits>[:<premiumPercent>]]]
+--price <mode>:<type>:<intervalOrDash>:<amountCents>[:<flatOrMetered>[:<includedUsageUnits>[:<premiumPercent>[:<baseSubscriptionAmountCents>]]]]
 ```
 
 Fields:
@@ -226,6 +227,7 @@ Fields:
 - `flatOrMetered`: optional, defaults to `flat`
 - `includedUsageUnits`: required only for `metered` prices, for example billed units per `1000` tokens
 - `premiumPercent`: optional for `metered`, adds markup to the customer-facing billed unit rate
+- `baseSubscriptionAmountCents`: optional for `metered`, adds a fixed recurring base fee to the same subscription
 
 Examples:
 
@@ -236,6 +238,7 @@ Examples:
 - `--price managed:one_time:-:4999`
 - `--price managed:subscription:month:15:metered:1000`
 - `--price managed:subscription:month:15:metered:1000:25`
+- `--price managed:subscription:month:15:metered:1000:25:1299`
 
 Behavior:
 
@@ -257,6 +260,8 @@ Branding flags:
 - `--access-subtitle <text>` custom helper text above login
 - `--plans-subtitle <text>` custom helper text above plan cards
 - `--byok-subtitle <text>` custom helper text in the BYOK key form card
+- `--managed-subscription-label <text>` custom plan meta label for managed subscription cards
+- `--byok-subscription-label <text>` custom plan meta label for BYOK subscription cards
 - `--token-explanation <text>` optional plain-language note shown when metered plans exist
 - `--token-help-url <https-url>` optional docs link shown next to token explanation
 - `--token-help-label <text>` optional link label (default: `Learn more`)
@@ -272,6 +277,7 @@ Metered pricing notes:
 - `premiumPercent` adds a configurable markup before the Stripe price is created
 - example: `managed:subscription:month:15:metered:1000` means `$0.15` per `1000` tokens
 - example: `managed:subscription:month:15:metered:1000:25` bills the customer `$0.19` per `1000` tokens (`ceil(15 * 1.25)`)
+- example: `managed:subscription:month:15:metered:1000:25:1299` adds `$12.99/month` base fee plus usage charges
 
 ### `paywallm update-app <appId> ...`
 
@@ -414,6 +420,7 @@ GET /preview
 - `primary-color`, `accent-color`, `theme`
 - `support-url`, `legal-text`
 - `hero-subtitle`, `access-subtitle`, `plans-subtitle`, `byok-subtitle`
+- `managed-subscription-label`, `byok-subscription-label`
 - `token-explanation`, `token-help-url`, `token-help-label`
 - `price` (repeat): same shorthand as CLI, for example `managed:subscription:month:15:metered:1000:25`
 

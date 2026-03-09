@@ -104,6 +104,23 @@ test("parseCliPriceFlag parses metered premium percentages", () => {
   });
 });
 
+test("parseCliPriceFlag parses metered base subscription amounts", () => {
+  assert.deepEqual(parseCliPriceFlag("managed:subscription:month:15:metered:1000:25:1299"), {
+    lookupKey: "managed_subscription_month_15_base_1299",
+    mode: "managed",
+    type: "subscription",
+    billingScheme: "metered",
+    interval: "month",
+    unitAmountUsd: 15,
+    billedUnitAmountUsd: 15,
+    meterValueName: "tokens",
+    meterAggregationKey: "llm_total_tokens",
+    includedUsageUnits: 1000,
+    billingPremiumPercent: 25,
+    baseSubscriptionAmountUsd: 1299,
+  });
+});
+
 test("parseCliPriceFlag rejects malformed input", () => {
   assert.throws(() => parseCliPriceFlag("managed:subscription:month"), /Invalid --price format/);
 });
@@ -120,12 +137,6 @@ test("readPrices normalizes stored records", () => {
           interval: "month",
           unitAmountUsd: 1500,
           stripePriceId: "price_123",
-          meterEventName: undefined,
-          stripeMeterId: undefined,
-          meterValueName: undefined,
-          meterAggregationKey: undefined,
-          includedUsageUnits: undefined,
-          billingPremiumPercent: undefined,
         },
         {
           lookupKey: "byok_one_time_one_time_999",
@@ -133,15 +144,7 @@ test("readPrices normalizes stored records", () => {
           type: "one_time",
           billingScheme: "flat",
           billedUnitAmountUsd: 999,
-          interval: undefined,
           unitAmountUsd: 999,
-          stripePriceId: undefined,
-          meterEventName: undefined,
-          stripeMeterId: undefined,
-          meterValueName: undefined,
-          meterAggregationKey: undefined,
-          includedUsageUnits: undefined,
-          billingPremiumPercent: undefined,
         },
     ]),
     [
@@ -154,12 +157,6 @@ test("readPrices normalizes stored records", () => {
         interval: "month",
         unitAmountUsd: 1500,
         stripePriceId: "price_123",
-        meterEventName: undefined,
-        stripeMeterId: undefined,
-        meterValueName: undefined,
-        meterAggregationKey: undefined,
-        includedUsageUnits: undefined,
-        billingPremiumPercent: undefined,
       },
       {
         lookupKey: "byok_one_time_one_time_999",
@@ -169,13 +166,6 @@ test("readPrices normalizes stored records", () => {
         billedUnitAmountUsd: 999,
         interval: undefined,
         unitAmountUsd: 999,
-        stripePriceId: undefined,
-        meterEventName: undefined,
-        stripeMeterId: undefined,
-        meterValueName: undefined,
-        meterAggregationKey: undefined,
-        includedUsageUnits: undefined,
-        billingPremiumPercent: undefined,
       },
     ],
   );

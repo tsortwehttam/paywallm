@@ -377,6 +377,8 @@ function readBrandingFlags(
   const accessSubtitle = readSingleFlag(args, "--access-subtitle");
   const plansSubtitle = readSingleFlag(args, "--plans-subtitle");
   const byokSubtitle = readSingleFlag(args, "--byok-subtitle");
+  const managedSubscriptionLabel = readSingleFlag(args, "--managed-subscription-label");
+  const byokSubscriptionLabel = readSingleFlag(args, "--byok-subscription-label");
   const tokenExplanation = readSingleFlag(args, "--token-explanation");
   const tokenHelpUrl = readSingleFlag(args, "--token-help-url");
   const tokenHelpLabel = readSingleFlag(args, "--token-help-label");
@@ -396,6 +398,8 @@ function readBrandingFlags(
   if (accessSubtitle) copy.accessSubtitle = accessSubtitle;
   if (plansSubtitle) copy.plansSubtitle = plansSubtitle;
   if (byokSubtitle) copy.byokSubtitle = byokSubtitle;
+  if (managedSubscriptionLabel) copy.managedSubscriptionLabel = managedSubscriptionLabel;
+  if (byokSubscriptionLabel) copy.byokSubscriptionLabel = byokSubscriptionLabel;
   if (tokenExplanation) copy.tokenExplanation = tokenExplanation;
   if (tokenHelpUrl) copy.tokenHelpUrl = tokenHelpUrl;
   if (tokenHelpLabel) copy.tokenHelpLabel = tokenHelpLabel;
@@ -791,7 +795,7 @@ Price Input:
   --price <spec>         Repeatable shorthand price definition
 
 Price Shorthand:
-  <mode>:<type>:<intervalOrDash>:<amountCents>[:<flatOrMetered>[:<includedUsageUnits>[:<premiumPercent>]]]
+  <mode>:<type>:<intervalOrDash>:<amountCents>[:<flatOrMetered>[:<includedUsageUnits>[:<premiumPercent>[:<baseSubscriptionAmountCents>]]]]
 
   mode: byok | managed
   type: subscription | one_time
@@ -800,6 +804,7 @@ Price Shorthand:
   flatOrMetered: flat | metered (optional, defaults to flat)
   includedUsageUnits: required for metered managed subscription prices
   premiumPercent: optional managed metered markup percentage
+  baseSubscriptionAmountCents: optional fixed recurring base price for metered subscriptions
 
 Branding Flags:
   --app-name <text>
@@ -813,6 +818,8 @@ Branding Flags:
   --access-subtitle <text>
   --plans-subtitle <text>
   --byok-subtitle <text>
+  --managed-subscription-label <text>
+  --byok-subscription-label <text>
   --token-explanation <text>
   --token-help-url <https-url>
   --token-help-label <text>
@@ -852,6 +859,8 @@ Update Flags:
   --access-subtitle <text>
   --plans-subtitle <text>
   --byok-subtitle <text>
+  --managed-subscription-label <text>
+  --byok-subscription-label <text>
   --token-explanation <text>
   --token-help-url <https-url>
   --token-help-label <text>
