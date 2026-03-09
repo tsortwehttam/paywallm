@@ -65,9 +65,6 @@ const env = {
   stripeCancelUrl: must("STRIPE_CANCEL_URL"),
   sesFromEmail: must("SES_FROM_EMAIL"),
   devEchoLoginCode: process.env.DEV_ECHO_LOGIN_CODE === "1",
-  openAiKey: process.env.OPENAI_API_KEY ?? "",
-  anthropicKey: process.env.ANTHROPIC_API_KEY ?? "",
-  openRouterKey: process.env.OPENROUTER_API_KEY ?? "",
 };
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ region: env.region }));
@@ -750,12 +747,14 @@ async function llmRelay(
   const apiKey = await resolveProviderKey(appId, session.email, request.provider, request.mode);
 
   const upstream = await callProvider({
+    mode: request.mode,
     provider: request.provider,
     model: request.model,
     messages: request.messages,
     temperature: request.temperature,
     maxOutputTokens: request.maxOutputTokens,
     apiKey,
+    stripeCustomerId: membership.stripeCustomerId,
   });
 
   const normalized = normalizeProviderResponse(request.provider, upstream);
@@ -775,6 +774,7 @@ async function llmRelay(
     membership,
     mode: request.mode,
     provider: request.provider,
+    model: request.model,
     usage: normalized.usage,
   });
 
@@ -946,6 +946,7 @@ async function adminListUsage(
       appId: textOrUndefined(item.appId),
       email: textOrUndefined(item.email),
       provider: textOrUndefined(item.provider),
+      model: textOrUndefined(item.model),
       lookupKey,
       meterEventName: textOrUndefined(item.meterEventName),
       tokenCount: toFiniteNumber(item.tokenCount),
@@ -1187,10 +1188,10 @@ async function resolveProviderKey(
   mode: Mode,
 ): Promise<string> {
   if (mode === "managed") {
-    if (provider === "openai" && env.openAiKey) return env.openAiKey;
-    if (provider === "anthropic" && env.anthropicKey) return env.anthropicKey;
-    if (provider === "openrouter" && env.openRouterKey) return env.openRouterKey;
-    throw new Error("missing_managed_provider_key");
+    if (provider === "openrouter") {
+      throw new Error("managed_provider_unsupported");
+    }
+    return env.stripeSecretKey;
   }
 
   const result = await ddb.send(
@@ -1219,18 +1220,55 @@ async function resolveProviderKey(
 }
 
 async function callProvider(input: {
+  mode: Mode;
   provider: Provider;
   model: string;
   messages: Array<{ role: "system" | "user" | "assistant"; content: string }>;
   temperature?: number;
   maxOutputTokens?: number;
   apiKey: string;
+  stripeCustomerId?: string;
 }): Promise<unknown> {
+  if (input.mode === "managed") {
+    if (!input.stripeCustomerId) {
+      throw new Error("missing_stripe_customer");
+    }
+
+    if (input.provider === "openai") {
+      return postJson(
+        "https://llm.stripe.com/responses",
+        input.apiKey,
+        buildProviderPayload({
+          ...input,
+          model: gatewayModelName(input.provider, input.model),
+        }),
+        {
+          "X-Stripe-Customer-ID": input.stripeCustomerId,
+        },
+      );
+    }
+
+    return postJson(
+      "https://llm.stripe.com/v1/messages",
+      input.apiKey,
+      buildProviderPayload({
+        ...input,
+        model: gatewayModelName(input.provider, input.model),
+      }),
+      {
+        "X-Stripe-Customer-ID": input.stripeCustomerId,
+      },
+    );
+  }
+
   if (input.provider === "openai") {
     return postJson(
       "https://api.openai.com/v1/responses",
       input.apiKey,
-      buildProviderPayload(input),
+      buildProviderPayload({
+        ...input,
+        model: directModelName(input.provider, input.model),
+      }),
     );
   }
 
@@ -1238,7 +1276,10 @@ async function callProvider(input: {
     return postJson(
       "https://api.anthropic.com/v1/messages",
       input.apiKey,
-      buildProviderPayload(input),
+      buildProviderPayload({
+        ...input,
+        model: directModelName(input.provider, input.model),
+      }),
       {
         "anthropic-version": "2023-06-01",
       },
@@ -1249,8 +1290,23 @@ async function callProvider(input: {
   return postJson(
     "https://openrouter.ai/api/v1/chat/completions",
     input.apiKey,
-    buildProviderPayload(input),
+    buildProviderPayload({
+      ...input,
+      model: directModelName(input.provider, input.model),
+    }),
   );
+}
+
+function gatewayModelName(provider: Provider, model: string): string {
+  if (model.includes("/")) {
+    return model;
+  }
+  return `${provider}/${model}`;
+}
+
+function directModelName(provider: Provider, model: string): string {
+  const prefix = `${provider}/`;
+  return model.startsWith(prefix) ? model.slice(prefix.length) : model;
 }
 
 async function postJson(
@@ -1531,6 +1587,7 @@ async function maybeRecordManagedUsage(input: {
   membership: MembershipRecord;
   mode: Mode;
   provider: Provider;
+  model: string;
   usage:
     | {
         inputTokens?: number;
@@ -1543,25 +1600,15 @@ async function maybeRecordManagedUsage(input: {
     return;
   }
 
-  if (!input.membership.lookupKey) {
-    return;
-  }
-
-  const price = input.app.prices.find((entry) => entry.lookupKey === input.membership.lookupKey);
-  if (!price || price.billingScheme !== "metered" || !price.meterEventName) {
-    return;
-  }
-
-  if (!input.membership.stripeCustomerId) {
-    throw new Error("missing_stripe_customer");
-  }
-
   const totalTokens = input.usage?.totalTokens ?? mergeUsageTotals(input.usage);
   if (!totalTokens || totalTokens <= 0) {
     return;
   }
   const now = nowIso();
-  const billedUnits = price.includedUsageUnits
+  const price = input.membership.lookupKey
+    ? input.app.prices.find((entry) => entry.lookupKey === input.membership.lookupKey)
+    : undefined;
+  const billedUnits = price?.includedUsageUnits
     ? Math.ceil(totalTokens / price.includedUsageUnits)
     : totalTokens;
 
@@ -1579,39 +1626,9 @@ async function maybeRecordManagedUsage(input: {
         appId: input.app.appId,
         email: input.membership.email,
         provider: input.provider,
+        model: input.model,
         lookupKey: input.membership.lookupKey,
-        meterEventName: price.meterEventName,
-        tokenCount: totalTokens,
-        billedUnits,
-        reportedToStripe: false,
-        createdAt: now,
-      },
-    }),
-  );
-
-  await stripe.billing.meterEvents.create({
-    event_name: price.meterEventName,
-    identifier: requestId,
-    payload: {
-      stripe_customer_id: input.membership.stripeCustomerId,
-      [price.meterAggregationKey ?? "llm_total_tokens"]: String(totalTokens),
-    },
-    timestamp: epochSeconds(),
-  });
-
-  await ddb.send(
-    new PutCommand({
-      TableName: env.tableName,
-      Item: {
-        pk: usageKey,
-        sk: usageKey,
-        gsi1pk: key("APP", input.app.appId),
-        gsi1sk: key("USAGE", input.membership.email, nowIso()),
-        appId: input.app.appId,
-        email: input.membership.email,
-        provider: input.provider,
-        lookupKey: input.membership.lookupKey,
-        meterEventName: price.meterEventName,
+        meterEventName: price?.meterEventName,
         tokenCount: totalTokens,
         billedUnits,
         reportedToStripe: true,
@@ -2845,7 +2862,7 @@ function statusForError(message: string): number {
 
   if (
     message === "missing_byok_provider_key" ||
-    message === "missing_managed_provider_key" ||
+    message === "managed_provider_unsupported" ||
     message === "missing_stripe_customer"
   ) {
     return 400;

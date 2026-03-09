@@ -29,12 +29,9 @@ Required for deploy/runtime:
 - `STRIPE_CANCEL_URL`
 - `SES_FROM_EMAIL`
 
-Runtime toggles / optional provider support:
+Runtime toggle:
 
 - `DEV_ECHO_LOGIN_CODE`
-- `OPENAI_API_KEY`
-- `ANTHROPIC_API_KEY`
-- `OPENROUTER_API_KEY`
 
 CLI convenience:
 
@@ -728,16 +725,19 @@ Notes:
 
 - `upstream` is the raw parsed JSON returned by the upstream provider.
 - The exact shape of `upstream` varies by provider and model API.
-- The service currently supports `openai`, `anthropic`, and `openrouter`.
+- `managed` mode routes through Stripe AI Gateway (`llm.stripe.com`) and requires a Stripe customer on the membership.
+- `openrouter` is supported only for `byok` mode.
 - `outputText` is the normalized text extracted from the provider response.
 - `usage` is normalized when the provider returns token counts.
 - The service supports multi-message input, but it does not yet expose tool use or streaming.
 
 Provider notes:
 
-- `openai`: forwarded to the Responses API
-- `anthropic`: forwarded to the Messages API, with `system` messages folded into the top-level `system` field
-- `openrouter`: forwarded to the Chat Completions API
+- `managed + openai`: forwarded to Stripe AI Gateway `/responses`
+- `managed + anthropic`: forwarded to Stripe AI Gateway `/v1/messages`, with `system` messages folded into the top-level `system` field
+- `byok + openai`: forwarded to OpenAI `/v1/responses`
+- `byok + anthropic`: forwarded to Anthropic `/v1/messages`
+- `byok + openrouter`: forwarded to OpenRouter `/api/v1/chat/completions`
 
 Error response:
 
@@ -768,7 +768,7 @@ It already covers:
 - Stripe webhook entitlement updates
 - app creation with automatic Stripe product/price setup
 - BYOK key storage encrypted with KMS
-- managed-key forwarding to OpenAI, Anthropic, and OpenRouter
+- managed-mode forwarding through Stripe AI Gateway for OpenAI and Anthropic
 
 What still needs hardening before serious production use:
 
