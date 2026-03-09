@@ -1809,7 +1809,7 @@ function renderPaywallHtml(input: {
         max-width: 880px;
         background: color-mix(in srgb, var(--surface) 94%, transparent);
         border: 1px solid var(--border);
-        border-radius: 24px;
+        border-radius: 12px;
         box-shadow: 0 24px 80px rgba(15, 23, 42, 0.18);
         overflow: hidden;
       }
@@ -1827,7 +1827,7 @@ function renderPaywallHtml(input: {
       .brand img {
         width: 52px;
         height: 52px;
-        border-radius: 14px;
+        border-radius: 12px;
         object-fit: cover;
         background: rgba(255,255,255,0.16);
       }
@@ -1940,7 +1940,7 @@ function renderPaywallHtml(input: {
       }
       .plan {
         border: 1px solid var(--border);
-        border-radius: 16px;
+        border-radius: 12px;
         padding: 16px;
         display: flex;
         flex-direction: column;
@@ -2070,7 +2070,7 @@ function renderPaywallHtml(input: {
             ${tokenHelpHtml}
           </section>
           <div class="trust">
-            <span class="pill">Payments handled by Stripe</span>
+            <span>Payments handled by Stripe</span>
             ${input.app.branding.legalText ? `<span>${escapeHtml(input.app.branding.legalText)}</span>` : ""}
           </div>
         </section>
@@ -2178,7 +2178,7 @@ function renderPaywallHtml(input: {
             : typeof price.unitAmountUsd === "number"
               ? price.unitAmountUsd
               : 0;
-        return "$" + (amount / 100).toFixed(2) + " per " + price.includedUsageUnits.toLocaleString() + " tokens";
+        return "Plus $" + (amount / 100).toFixed(2) + " per " + price.includedUsageUnits.toLocaleString() + " tokens";
       }
 
       function renderPlans() {
