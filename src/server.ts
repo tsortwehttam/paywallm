@@ -1951,6 +1951,7 @@ function renderPaywallHtml(input: {
         display: flex;
         flex-direction: column;
         gap: 10px;
+        position: relative;
       }
       .plan.active {
         border-color: color-mix(in srgb, var(--primary) 44%, var(--border));
@@ -1974,8 +1975,7 @@ function renderPaywallHtml(input: {
         display: grid;
         gap: 10px;
         margin-top: 8px;
-        padding-top: 10px;
-        border-top: 1px solid var(--border);
+        padding-top: 4px;
       }
       .account-actions {
         margin-top: 4px;
@@ -1993,6 +1993,18 @@ function renderPaywallHtml(input: {
         font-size: 14px;
         text-decoration: underline;
         cursor: pointer;
+      }
+      .plan-badge {
+        position: absolute;
+        top: 10px;
+        right: 10px;
+        font-size: 11px;
+        font-weight: 700;
+        color: color-mix(in srgb, var(--primary) 82%, var(--text));
+        background: color-mix(in srgb, var(--primary) 12%, transparent);
+        border: 1px solid color-mix(in srgb, var(--primary) 30%, transparent);
+        border-radius: 999px;
+        padding: 4px 8px;
       }
       .tiny {
         font-size: 12px;
@@ -2227,36 +2239,41 @@ function renderPaywallHtml(input: {
           } else if (price.type === "subscription") {
             meta.textContent =
               price.mode === "byok"
-                ? (bootstrap.branding.copy && bootstrap.branding.copy.byokSubscriptionLabel) || "Developer? Provide your own agent API key"
+                ? (bootstrap.branding.copy && bootstrap.branding.copy.byokSubscriptionLabel) || "Provide your own agent API key"
                 : (bootstrap.branding.copy && bootstrap.branding.copy.managedSubscriptionLabel) || "Billed automatically";
           } else {
             meta.textContent = "One-time payment";
           }
-          const button = document.createElement("button");
-          button.className = "primary plan-select";
-          button.type = "button";
-          button.textContent = isActivePlan ? "Selected" : "Select";
-          button.disabled = isActivePlan;
-          button.addEventListener("click", () => startCheckout(price.lookupKey));
-
-          plan.append(title, amount, amountSubline, meta, button);
-
-          const isActiveByok = Boolean(isActivePlan && membership && membership.mode === "byok");
-          if (price.mode === "byok" && isActiveByok) {
-            const byokMessage = document.createElement("div");
-            byokMessage.className = "tiny";
-            byokMessage.textContent =
-              (bootstrap.branding.copy && bootstrap.branding.copy.byokSubtitle) || "Add your provider key below.";
-            plan.appendChild(byokMessage);
+          if (isActivePlan && price.mode === "byok") {
+            meta.classList.add("hidden");
           }
 
+          if (isActivePlan) {
+            const badge = document.createElement("div");
+            badge.className = "plan-badge";
+            badge.textContent = "Current Plan";
+            plan.appendChild(badge);
+          }
+
+          plan.append(title, amount, amountSubline, meta);
+
+          if (!isActivePlan) {
+            const button = document.createElement("button");
+            button.className = "primary plan-select";
+            button.type = "button";
+            button.textContent = membership && membership.paid ? "Switch Plan" : "Select";
+            button.addEventListener("click", () => startCheckout(price.lookupKey));
+            plan.appendChild(button);
+          }
+
+          const isActiveByok = Boolean(isActivePlan && membership && membership.mode === "byok");
           if (isActiveByok) {
             const form = document.createElement("form");
             form.className = "byok-inline";
             form.innerHTML =
               '<div class="split">' +
                 '<div class="row">' +
-                  "<label>Provider</label>" +
+                  "<label>AI Provider</label>" +
                   '<select name="provider">' +
                     '<option value="openai">OpenAI</option>' +
                     '<option value="anthropic">Anthropic</option>' +
@@ -2264,25 +2281,49 @@ function renderPaywallHtml(input: {
                   "</select>" +
                 "</div>" +
                 '<div class="row">' +
-                  "<label>API Key</label>" +
+                  '<label data-api-key-label>OpenAI API Key</label>' +
                   '<input name="apiKey" type="password" autocomplete="off" required />' +
                 "</div>" +
               "</div>" +
-              '<button class="primary" type="submit">Save Key</button>';
+              '<button class="primary" type="submit" disabled>Set API Key</button>';
+            const providerInput = form.querySelector("select[name=provider]");
+            const apiKeyInput = form.querySelector("input[name=apiKey]");
+            const apiKeyLabel = form.querySelector("label[data-api-key-label]");
+            const submitButton = form.querySelector("button[type=submit]");
+            const providerLabelByValue = {
+              openai: "OpenAI",
+              anthropic: "Anthropic",
+              openrouter: "OpenRouter",
+            };
+            function refreshByokFormState() {
+              if (!providerInput || !apiKeyInput || !apiKeyLabel || !submitButton) return;
+              const providerName = providerLabelByValue[providerInput.value] || "Provider";
+              apiKeyLabel.textContent = providerName + " API Key";
+              submitButton.disabled = apiKeyInput.value.trim().length === 0;
+            }
+            if (providerInput) {
+              providerInput.addEventListener("change", refreshByokFormState);
+            }
+            if (apiKeyInput) {
+              apiKeyInput.addEventListener("input", refreshByokFormState);
+            }
+            refreshByokFormState();
             form.addEventListener("submit", async (event) => {
               event.preventDefault();
-              const providerInput = form.querySelector("select[name=provider]");
-              const apiKeyInput = form.querySelector("input[name=apiKey]");
-              if (!providerInput || !apiKeyInput) return;
+              if (!providerInput || !apiKeyInput || !submitButton) return;
+              if (apiKeyInput.value.trim().length === 0) return;
               try {
+                submitButton.disabled = true;
                 await api("/v1/apps/" + encodeURIComponent(bootstrap.appId) + "/keys", "POST", {
                   provider: providerInput.value,
                   apiKey: apiKeyInput.value.trim(),
                 }, true);
                 apiKeyInput.value = "";
+                refreshByokFormState();
                 setStatus("API key saved.", false);
               } catch (error) {
                 setStatus(error.message || "Couldn't save your key. Please try again.", true);
+                refreshByokFormState();
               }
             });
             plan.appendChild(form);
