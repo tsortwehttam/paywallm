@@ -1856,10 +1856,8 @@ function renderPaywallHtml(input: {
         display: grid;
         gap: 12px;
         padding-bottom: 16px;
-        border-bottom: 1px solid var(--border);
       }
       .step:last-of-type {
-        border-bottom: 0;
         padding-bottom: 0;
       }
       .step-head {
@@ -1871,24 +1869,16 @@ function renderPaywallHtml(input: {
         margin: 0;
         font-size: 18px;
       }
-      .step-num {
-        width: 24px;
-        height: 24px;
-        border-radius: 999px;
-        display: inline-grid;
-        place-items: center;
-        font-size: 12px;
-        font-weight: 700;
-        background: color-mix(in srgb, var(--primary) 14%, transparent);
-      }
       .subtle {
         color: var(--muted);
         font-size: 14px;
       }
       .status {
-        min-height: 22px;
         font-size: 14px;
         padding: 0 2px;
+      }
+      .status:empty {
+        display: none;
       }
       .row, form {
         display: grid;
@@ -1966,6 +1956,10 @@ function renderPaywallHtml(input: {
       }
       .price-subline {
         margin-top: -4px;
+        min-height: 16px;
+      }
+      .price-subline.placeholder {
+        visibility: hidden;
       }
       .plan-select {
         margin-top: auto;
@@ -1982,6 +1976,17 @@ function renderPaywallHtml(input: {
         display: flex;
         gap: 10px;
         flex-wrap: wrap;
+      }
+      .auth-inline {
+        display: flex;
+        gap: 8px;
+        align-items: baseline;
+      }
+      .auth-link {
+        color: var(--primary);
+        font-size: 14px;
+        text-decoration: underline;
+        cursor: pointer;
       }
       .tiny {
         font-size: 12px;
@@ -2029,8 +2034,7 @@ function renderPaywallHtml(input: {
         <section class="content">
           <div id="status" class="status" aria-live="polite"></div>
           <section class="step" id="signInStep">
-            <div class="step-head">
-              <span class="step-num">1</span>
+            <div class="step-head" id="authHeader">
               <div>
                 <h2 id="authTitle">Sign In</h2>
                 <div class="subtle" id="authSubtitle">${escapeHtml(copy?.accessSubtitle ?? "Use your email to get a sign-in code.")}</div>
@@ -2050,33 +2054,20 @@ function renderPaywallHtml(input: {
               </div>
               <button class="primary" type="submit">Verify</button>
             </form>
-            <div id="signedInNote" class="hidden subtle"></div>
-            <div class="account-actions hidden" id="authActions">
-              <button class="secondary" id="logoutButton" type="button">Log Out</button>
+            <div id="signedInRow" class="hidden auth-inline">
+              <div id="signedInNote" class="subtle"></div>
+              <a id="logoutLink" class="auth-link" href="#">Log out</a>
             </div>
           </section>
           <section class="step hidden" id="plansStep">
             <div class="step-head">
-              <span class="step-num">2</span>
               <div>
-                <h2>Choose Plan</h2>
+                <h2>Choose plan</h2>
                 <div class="subtle">${escapeHtml(copy?.plansSubtitle ?? "Pick the plan that matches how you want to pay.")}</div>
               </div>
             </div>
             <div id="plans" class="plans"></div>
             ${tokenHelpHtml}
-          </section>
-          <section class="step hidden" id="accountStep">
-            <div class="step-head">
-              <span class="step-num">3</span>
-              <div>
-                <h2>Finish</h2>
-                <div id="accountSummary" class="subtle"></div>
-              </div>
-            </div>
-            <div class="account-actions">
-              <button class="secondary" id="portalButton" type="button">Manage Billing</button>
-            </div>
           </section>
           <div class="trust">
             <span class="pill">Payments handled by Stripe</span>
@@ -2097,18 +2088,16 @@ function renderPaywallHtml(input: {
       const statusNode = document.getElementById("status");
       const startForm = document.getElementById("startForm");
       const verifyForm = document.getElementById("verifyForm");
+      const signedInRow = document.getElementById("signedInRow");
       const signedInNote = document.getElementById("signedInNote");
+      const authHeader = document.getElementById("authHeader");
       const authTitle = document.getElementById("authTitle");
       const authSubtitle = document.getElementById("authSubtitle");
-      const authActions = document.getElementById("authActions");
       const plansStep = document.getElementById("plansStep");
-      const accountStep = document.getElementById("accountStep");
-      const accountSummary = document.getElementById("accountSummary");
       const plansNode = document.getElementById("plans");
       const emailInput = document.getElementById("email");
       const codeInput = document.getElementById("code");
-      const portalButton = document.getElementById("portalButton");
-      const logoutButton = document.getElementById("logoutButton");
+      const logoutLink = document.getElementById("logoutLink");
 
       document.documentElement.dataset.theme = bootstrap.branding.preferredTheme;
       emailInput.value = state.email;
@@ -2219,8 +2208,12 @@ function renderPaywallHtml(input: {
           }
           const amountSubline = document.createElement("div");
           amountSubline.className = "tiny price-subline";
-          amountSubline.textContent = meteredTokenLine && hasBaseSubscriptionAmount ? meteredTokenLine : "";
-          amountSubline.classList.toggle("hidden", !(meteredTokenLine && hasBaseSubscriptionAmount));
+          if (meteredTokenLine && hasBaseSubscriptionAmount) {
+            amountSubline.textContent = meteredTokenLine;
+          } else {
+            amountSubline.textContent = "-";
+            amountSubline.classList.add("placeholder");
+          }
           const meta = document.createElement("div");
           meta.className = "tiny";
           if (price.billingScheme === "metered") {
@@ -2293,40 +2286,24 @@ function renderPaywallHtml(input: {
       }
 
       function renderAccount() {
-        const membership = state.me && state.me.membership;
         const signedIn = Boolean(state.me);
-        const paid = Boolean(membership && membership.paid);
         startForm.classList.toggle("hidden", signedIn);
         verifyForm.classList.toggle("hidden", !state.email || signedIn);
-        signedInNote.classList.toggle("hidden", !signedIn);
-        authActions.classList.toggle("hidden", !signedIn);
+        signedInRow.classList.toggle("hidden", !signedIn);
+        authHeader.classList.toggle("hidden", signedIn);
         plansStep.classList.toggle("hidden", !signedIn);
-        accountStep.classList.toggle("hidden", !signedIn);
 
         if (!signedIn) {
           authTitle.textContent = "Sign In";
           authSubtitle.textContent = ${JSON.stringify(copy?.accessSubtitle ?? "Use your email to get a sign-in code.")};
           signedInNote.textContent = "";
-          accountSummary.textContent = "";
-          portalButton.classList.add("hidden");
           renderPlans();
           return;
         }
 
-        authTitle.textContent = "Account";
-        authSubtitle.textContent = "You're signed in and can manage your plan below.";
+        authTitle.textContent = "";
+        authSubtitle.textContent = "";
         signedInNote.textContent = "Signed in as " + state.me.email + ".";
-        if (!paid) {
-          accountSummary.textContent = "No active plan yet. Choose one above to continue.";
-          portalButton.classList.add("hidden");
-        } else if (membership.mode === "byok") {
-          accountSummary.textContent = "BYOK plan is active. Add your API key in the BYOK plan card above.";
-          portalButton.classList.toggle("hidden", !membership.stripeCustomerId);
-        } else {
-          accountSummary.textContent = "All Included plan is active. You are ready to use the app.";
-          portalButton.classList.toggle("hidden", !membership.stripeCustomerId);
-        }
-
         renderPlans();
       }
 
@@ -2339,14 +2316,7 @@ function renderPaywallHtml(input: {
         try {
           state.me = await api("/me", "GET", undefined, true);
           renderAccount();
-          const membership = state.me && state.me.membership;
-          if (!membership || !membership.paid) {
-            setStatus("Signed in. Step 2: choose a plan.", false);
-          } else if (membership.mode === "byok") {
-            setStatus("Plan active. Step 3: add your API key in the BYOK plan card.", false);
-          } else {
-            setStatus("Plan active. You are all set.", false);
-          }
+          setStatus("", false);
           emit("auth_success", { email: state.me.email, membership: state.me.membership || null });
         } catch (error) {
           sessionStorage.removeItem(storageKey);
@@ -2408,7 +2378,8 @@ function renderPaywallHtml(input: {
         }
       });
 
-      logoutButton.addEventListener("click", async () => {
+      logoutLink.addEventListener("click", async (event) => {
+        event.preventDefault();
         try {
           await api("/auth/logout", "POST", {}, true);
         } finally {
@@ -2421,17 +2392,6 @@ function renderPaywallHtml(input: {
           verifyForm.classList.add("hidden");
           renderAccount();
           setStatus("Logged out.", false);
-        }
-      });
-
-      portalButton.addEventListener("click", async () => {
-        try {
-          const payload = {};
-          if (bootstrap.returnUrl) payload.returnUrl = bootstrap.returnUrl;
-          const result = await api("/billing/portal", "POST", payload, true);
-          window.location.href = result.url;
-        } catch (error) {
-          setStatus(error.message || "Something went wrong. Please try again.", true);
         }
       });
 
@@ -2476,7 +2436,6 @@ function renderPaywallHtml(input: {
           },
         };
         renderAccount();
-        setStatus("This is a preview. Actions are disabled.", false);
         emit("ready", { appId: bootstrap.appId, height: document.documentElement.scrollHeight, preview: true });
         emit("resize", { height: document.documentElement.scrollHeight });
       } else {
