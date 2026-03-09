@@ -5,12 +5,14 @@ export const BillingTypeSchema = z.enum(["subscription", "one_time"]);
 export const ProviderSchema = z.enum(["openai", "anthropic", "openrouter"]);
 export const PreferredThemeSchema = z.enum(["light", "dark", "system"]);
 export const BillingSchemeSchema = z.enum(["flat", "metered"]);
+export const IdentityTypeSchema = z.enum(["email"]);
 
 export type Mode = z.infer<typeof ModeSchema>;
 export type BillingType = z.infer<typeof BillingTypeSchema>;
 export type Provider = z.infer<typeof ProviderSchema>;
 export type PreferredTheme = z.infer<typeof PreferredThemeSchema>;
 export type BillingScheme = z.infer<typeof BillingSchemeSchema>;
+export type IdentityType = z.infer<typeof IdentityTypeSchema>;
 
 export const AppCopySchema = z.object({
   heroSubtitle: z.string().min(1).optional(),
@@ -183,10 +185,31 @@ export const AppRecordSchema = z.object({
 
 export type AppRecord = z.infer<typeof AppRecordSchema>;
 
+export const UserRecordSchema = z.object({
+  userId: z.string().min(1),
+  primaryEmail: z.string().email().optional(),
+  createdAt: z.string().min(1),
+  updatedAt: z.string().min(1),
+});
+
+export type UserRecord = z.infer<typeof UserRecordSchema>;
+
+export const IdentityRecordSchema = z.object({
+  userId: z.string().min(1),
+  type: IdentityTypeSchema,
+  key: z.string().min(1),
+  email: z.string().email().optional(),
+  createdAt: z.string().min(1),
+  updatedAt: z.string().min(1),
+});
+
+export type IdentityRecord = z.infer<typeof IdentityRecordSchema>;
+
 export const MembershipRecordSchema = z
   .object({
     appId: z.string().min(1),
-    email: z.string().email(),
+    userId: z.string().min(1),
+    email: z.string().email().optional(),
     paid: z.boolean(),
     lookupKey: z.string().min(1).optional(),
     mode: ModeSchema.optional(),
@@ -227,7 +250,8 @@ export type MembershipRecord = z.infer<typeof MembershipRecordSchema>;
 
 export const StoredSessionRecordSchema = z.object({
   appId: z.string().min(1),
-  email: z.string().email(),
+  userId: z.string().min(1),
+  email: z.string().email().optional(),
   ttl: z.number().int().nonnegative(),
 });
 
@@ -235,7 +259,7 @@ export type StoredSessionRecord = z.infer<typeof StoredSessionRecordSchema>;
 
 export const ProviderKeyRecordSchema = z.object({
   appId: z.string().min(1),
-  email: z.string().email(),
+  userId: z.string().min(1),
   provider: ProviderSchema,
   ciphertext: z.string().min(1),
   updatedAt: z.string().min(1),
@@ -405,7 +429,8 @@ export function parseMembershipRecord(value: unknown): MembershipRecord {
   const row = record(value);
   return MembershipRecordSchema.parse({
     appId: z.string().min(1).parse(row.appId),
-    email: z.string().email().parse(normalizeEmail(row.email)),
+    userId: z.string().min(1).parse(row.userId),
+    email: row.email === undefined ? undefined : z.string().email().parse(normalizeEmail(row.email)),
     paid: z.boolean().parse(row.paid),
     lookupKey: optionalString(row.lookupKey),
     mode: row.mode === undefined ? undefined : ModeSchema.parse(row.mode),
@@ -423,7 +448,8 @@ export function parseStoredSessionRecord(value: unknown): StoredSessionRecord {
   const row = record(value);
   return StoredSessionRecordSchema.parse({
     appId: z.string().min(1).parse(row.appId),
-    email: z.string().email().parse(normalizeEmail(row.email)),
+    userId: z.string().min(1).parse(row.userId),
+    email: row.email === undefined ? undefined : z.string().email().parse(normalizeEmail(row.email)),
     ttl: z.number().int().nonnegative().parse(toNumber(row.ttl)),
   });
 }
@@ -432,9 +458,31 @@ export function parseProviderKeyRecord(value: unknown): ProviderKeyRecord {
   const row = record(value);
   return ProviderKeyRecordSchema.parse({
     appId: z.string().min(1).parse(row.appId),
-    email: z.string().email().parse(normalizeEmail(row.email)),
+    userId: z.string().min(1).parse(row.userId),
     provider: ProviderSchema.parse(row.provider),
     ciphertext: z.string().min(1).parse(row.ciphertext),
+    updatedAt: z.string().min(1).parse(row.updatedAt),
+  });
+}
+
+export function parseUserRecord(value: unknown): UserRecord {
+  const row = record(value);
+  return UserRecordSchema.parse({
+    userId: z.string().min(1).parse(row.userId),
+    primaryEmail: row.primaryEmail === undefined ? undefined : z.string().email().parse(normalizeEmail(row.primaryEmail)),
+    createdAt: z.string().min(1).parse(row.createdAt),
+    updatedAt: z.string().min(1).parse(row.updatedAt),
+  });
+}
+
+export function parseIdentityRecord(value: unknown): IdentityRecord {
+  const row = record(value);
+  return IdentityRecordSchema.parse({
+    userId: z.string().min(1).parse(row.userId),
+    type: IdentityTypeSchema.parse(row.type),
+    key: z.string().min(1).parse(row.key),
+    email: row.email === undefined ? undefined : z.string().email().parse(normalizeEmail(row.email)),
+    createdAt: z.string().min(1).parse(row.createdAt),
     updatedAt: z.string().min(1).parse(row.updatedAt),
   });
 }

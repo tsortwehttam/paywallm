@@ -36,6 +36,7 @@ test("isMembershipEntitled requires both paid status and matching mode", () => {
     isMembershipEntitled(
       {
         appId: "game-a",
+        userId: "usr_123",
         email: "user@example.com",
         paid: true,
         mode: "managed",
@@ -51,6 +52,7 @@ test("isMembershipEntitled requires both paid status and matching mode", () => {
     isMembershipEntitled(
       {
         appId: "game-a",
+        userId: "usr_123",
         email: "user@example.com",
         paid: false,
         updatedAt: "2026-02-28T00:00:00.000Z",

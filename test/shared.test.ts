@@ -6,10 +6,12 @@ import {
   parseCliPriceFlag,
   parseLlmRelayRequest,
   parseMembershipRecord,
+  parseIdentityRecord,
   parseLoginCodeRecord,
   parseProvider,
   parseProviderKeyRecord,
   parseStoredSessionRecord,
+  parseUserRecord,
   readPrices,
 } from "../src/shared.js";
 
@@ -314,6 +316,7 @@ test("parseMembershipRecord validates paid memberships", () => {
   assert.deepEqual(
     parseMembershipRecord({
       appId: "game-a",
+      userId: "usr_123",
       email: "USER@example.com",
       paid: true,
       mode: "managed",
@@ -324,6 +327,7 @@ test("parseMembershipRecord validates paid memberships", () => {
     }),
     {
       appId: "game-a",
+      userId: "usr_123",
       email: "user@example.com",
       paid: true,
       lookupKey: undefined,
@@ -342,11 +346,13 @@ test("parseStoredSessionRecord normalizes numeric ttl", () => {
   assert.deepEqual(
     parseStoredSessionRecord({
       appId: "game-a",
+      userId: "usr_123",
       email: "USER@example.com",
       ttl: "12345",
     }),
     {
       appId: "game-a",
+      userId: "usr_123",
       email: "user@example.com",
       ttl: 12345,
     },
@@ -357,16 +363,54 @@ test("parseProviderKeyRecord validates encrypted BYOK rows", () => {
   assert.deepEqual(
     parseProviderKeyRecord({
       appId: "game-a",
-      email: "USER@example.com",
+      userId: "usr_123",
       provider: "openrouter",
       ciphertext: "Zm9v",
       updatedAt: "2026-02-27T00:00:00.000Z",
     }),
     {
       appId: "game-a",
-      email: "user@example.com",
+      userId: "usr_123",
       provider: "openrouter",
       ciphertext: "Zm9v",
+      updatedAt: "2026-02-27T00:00:00.000Z",
+    },
+  );
+});
+
+test("parseUserRecord normalizes primary email", () => {
+  assert.deepEqual(
+    parseUserRecord({
+      userId: "usr_123",
+      primaryEmail: "USER@example.com",
+      createdAt: "2026-02-27T00:00:00.000Z",
+      updatedAt: "2026-02-27T00:00:00.000Z",
+    }),
+    {
+      userId: "usr_123",
+      primaryEmail: "user@example.com",
+      createdAt: "2026-02-27T00:00:00.000Z",
+      updatedAt: "2026-02-27T00:00:00.000Z",
+    },
+  );
+});
+
+test("parseIdentityRecord validates email identity rows", () => {
+  assert.deepEqual(
+    parseIdentityRecord({
+      userId: "usr_123",
+      type: "email",
+      key: "user@example.com",
+      email: "USER@example.com",
+      createdAt: "2026-02-27T00:00:00.000Z",
+      updatedAt: "2026-02-27T00:00:00.000Z",
+    }),
+    {
+      userId: "usr_123",
+      type: "email",
+      key: "user@example.com",
+      email: "user@example.com",
+      createdAt: "2026-02-27T00:00:00.000Z",
       updatedAt: "2026-02-27T00:00:00.000Z",
     },
   );

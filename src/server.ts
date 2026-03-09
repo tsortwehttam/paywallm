@@ -13,6 +13,7 @@ import {
   PutCommand,
   QueryCommand,
   ScanCommand,
+  TransactWriteCommand,
 } from "@aws-sdk/lib-dynamodb";
 import { EncryptCommand, DecryptCommand, KMSClient } from "@aws-sdk/client-kms";
 import { SESClient, SendEmailCommand } from "@aws-sdk/client-ses";
@@ -38,8 +39,10 @@ import {
   parseMembershipRecord,
   parseMode,
   parseProvider,
+  parseIdentityRecord,
   parseProviderKeyRecord,
   parseStoredSessionRecord,
+  parseUserRecord,
   parseCliPriceFlag,
   readPrices,
   type ApiErrorResponse,
@@ -48,10 +51,12 @@ import {
   type AppPrice,
   type BillingScheme,
   type BillingType,
+  type IdentityRecord,
   type LlmRelaySuccessResponse,
   type MembershipRecord,
   type Mode,
   type Provider,
+  type UserRecord,
 } from "./shared.js";
 
 const env = {
@@ -77,19 +82,29 @@ type JsonRecord = Record<string, unknown>;
 type SessionRecord = {
   tokenHash: string;
   appId: string;
-  email: string;
+  userId: string;
+  email?: string;
   expiresAt: number;
 };
+
+type SessionTransport = "cookie" | "token" | "both";
 
 export async function handler(
   event: APIGatewayProxyEventV2,
 ): Promise<APIGatewayProxyStructuredResultV2> {
   try {
     if (event.requestContext.http.method === "OPTIONS") {
-      return withCors(event, {
-        statusCode: 204,
-        headers: {},
-      });
+      const allowedOrigins = await resolveAllowedOriginsForEvent(event);
+      return withCors(
+        event,
+        withAllowedOrigins(
+          {
+            statusCode: 204,
+            headers: {},
+          },
+          allowedOrigins,
+        ),
+      );
     }
 
     const route = `${event.requestContext.http.method} ${event.rawPath}`;
@@ -133,18 +148,27 @@ export async function handler(
     if (error instanceof ZodError) {
       return withCors(
         event,
-        json(400, {
-          error: "validation_error",
-          details: error.issues.map((issue) => ({
-            path: issue.path.join("."),
-            message: issue.message,
-          })),
-        }),
+        withAllowedOrigins(
+          json(400, {
+            error: "validation_error",
+            details: error.issues.map((issue) => ({
+              path: issue.path.join("."),
+              message: issue.message,
+            })),
+          }),
+          await resolveAllowedOriginsForEvent(event),
+        ),
       );
     }
 
     const message = error instanceof Error ? error.message : "unknown_error";
-    return withCors(event, json(statusForError(message), { error: message }));
+    return withCors(
+      event,
+      withAllowedOrigins(
+        json(statusForError(message), { error: message }),
+        await resolveAllowedOriginsForEvent(event),
+      ),
+    );
   }
 }
 
@@ -154,7 +178,7 @@ async function authStart(
   const body = await bodyJson(event);
   const appId = text(body.appId);
   const email = normalizeEmail(body.email);
-  await requireApp(appId);
+  const app = await requireApp(appId);
 
   const loginItem = await ddb.send(
     new GetCommand({
@@ -201,11 +225,14 @@ async function authStart(
 
   await maybeSendCode(email, appId, code);
 
-  return json(200, {
-    ok: true,
-    delivery: env.devEchoLoginCode ? "echo" : "email",
-    code: env.devEchoLoginCode ? code : undefined,
-  });
+  return withAllowedOrigins(
+    json(200, {
+      ok: true,
+      delivery: env.devEchoLoginCode ? "echo" : "email",
+      code: env.devEchoLoginCode ? code : undefined,
+    }),
+    app.branding.allowedOrigins,
+  );
 }
 
 async function authVerify(
@@ -215,6 +242,8 @@ async function authVerify(
   const appId = text(body.appId);
   const email = normalizeEmail(body.email);
   const code = text(body.code);
+  const sessionTransport = parseSessionTransport(body.sessionTransport);
+  const app = await requireApp(appId);
 
   const loginItem = await ddb.send(
     new GetCommand({
@@ -227,7 +256,7 @@ async function authVerify(
   );
 
   if (!loginItem.Item) {
-    return json(401, { error: "invalid_code" });
+    return withAllowedOrigins(json(401, { error: "invalid_code" }), app.branding.allowedOrigins);
   }
 
   const loginRecord = parseLoginCodeRecord(loginItem.Item);
@@ -273,7 +302,7 @@ async function authVerify(
       throw new Error("login_locked");
     }
 
-    return json(401, { error: "invalid_code" });
+    return withAllowedOrigins(json(401, { error: "invalid_code" }), app.branding.allowedOrigins);
   }
 
   await ddb.send(
@@ -289,6 +318,7 @@ async function authVerify(
   const token = randomToken();
   const tokenHash = sha256(token);
   const ttl = ttlFromNow(30 * 24 * 60 * 60);
+  const user = await resolveOrCreateUserByEmail(email);
 
   await ddb.send(
     new PutCommand({
@@ -297,27 +327,35 @@ async function authVerify(
         pk: key("SESSION", tokenHash),
         sk: key("SESSION", tokenHash),
         gsi1pk: key("APP", appId),
-        gsi1sk: key("SESSION", email),
+        gsi1sk: key("SESSION", user.userId),
         appId,
+        userId: user.userId,
         email,
         ttl,
       },
     }),
   );
 
-  await ensureMembership(appId, email);
+  await ensureMembership(appId, user.userId, email);
 
-  return {
+  const response = {
     statusCode: 200,
     headers: {
       "content-type": "application/json",
-      "set-cookie": `paywallm_session=${token}; HttpOnly; Path=/; Secure; SameSite=Lax; Max-Age=${30 * 24 * 60 * 60}`,
-    },
+    } as Record<string, string>,
     body: JSON.stringify({
       ok: true,
-      sessionToken: token,
+      sessionTransport,
+      sessionToken: sessionTransport === "token" || sessionTransport === "both" ? token : undefined,
     }),
   };
+
+  if (sessionTransport === "cookie" || sessionTransport === "both") {
+    response.headers["set-cookie"] =
+      `paywallm_session=${token}; HttpOnly; Path=/; Secure; SameSite=Lax; Max-Age=${30 * 24 * 60 * 60}`;
+  }
+
+  return withAllowedOrigins(response, app.branding.allowedOrigins);
 }
 
 async function authLogout(
@@ -327,6 +365,9 @@ async function authLogout(
   if (!token) {
     return json(200, { ok: true });
   }
+
+  const session = await requireSession(event);
+  const app = await requireApp(session.appId);
 
   await ddb.send(
     new DeleteCommand({
@@ -338,27 +379,41 @@ async function authLogout(
     }),
   );
 
-  return {
+  return withAllowedOrigins({
     statusCode: 200,
     headers: {
       "content-type": "application/json",
       "set-cookie": "paywallm_session=; HttpOnly; Path=/; Secure; SameSite=Lax; Max-Age=0",
     },
     body: JSON.stringify({ ok: true }),
-  };
+  }, app.branding.allowedOrigins);
 }
 
 async function me(event: APIGatewayProxyEventV2): Promise<APIGatewayProxyStructuredResultV2> {
   const session = await requireSession(event);
-  const membership = await getMembership(session.appId, session.email);
+  const membership = await getMembership(session.appId, session.userId);
   const app = await requireApp(session.appId);
+  const user = await requireUser(session.userId);
+  const profileEmail = user.primaryEmail ?? session.email;
 
-  return json(200, {
-    appId: session.appId,
-    email: session.email,
-    membership,
-    app,
-  });
+  return withAllowedOrigins(
+    json(200, {
+      appId: session.appId,
+      user: {
+        userId: user.userId,
+        profileEmail,
+      },
+      session: {
+        loginIdentity: {
+          type: "email",
+          email: session.email ?? profileEmail,
+        },
+      },
+      membership,
+      app,
+    }),
+    app.branding.allowedOrigins,
+  );
 }
 
 async function paywallPage(
@@ -371,6 +426,7 @@ async function paywallPage(
   const cancelUrl = readQueryParam(event, "cancel_url") ?? "";
   const returnUrl = readQueryParam(event, "return_url") ?? "";
   const checkoutState = readQueryParam(event, "checkout") ?? "";
+  const sessionTransport = paywallSessionTransport(readQueryParam(event, "session_transport"), embed);
   const html = renderPaywallHtml({
     app,
     embed,
@@ -379,6 +435,7 @@ async function paywallPage(
     cancelUrl,
     returnUrl,
     checkoutState,
+    sessionTransport,
   });
 
   return {
@@ -448,14 +505,16 @@ async function paywallPreviewPage(
 
   const previewModeRaw = previewParam(params, "preview-mode");
   const previewMode = previewModeRaw === "managed" || previewModeRaw === "byok" ? previewModeRaw : undefined;
+  const embed = readPreviewBoolean(params, "embed");
   const html = renderPaywallHtml({
     app,
-    embed: readPreviewBoolean(params, "embed"),
+    embed,
     prefillEmail: previewParam(params, "email") ?? "",
     successUrl: previewParam(params, "success-url") ?? "",
     cancelUrl: previewParam(params, "cancel-url") ?? "",
     returnUrl: previewParam(params, "return-url") ?? "",
     checkoutState: previewParam(params, "checkout-state") ?? "",
+    sessionTransport: paywallSessionTransport(previewParam(params, "session-transport"), embed),
     preview: {
       enabled: true,
       email: previewParam(params, "preview-email") ?? "preview@example.com",
@@ -508,6 +567,8 @@ async function billingCheckout(
   const successUrl = pickRedirectUrl(body.successUrl, env.stripeSuccessUrl);
   const cancelUrl = pickRedirectUrl(body.cancelUrl, env.stripeCancelUrl);
   const app = await requireApp(session.appId);
+  const user = await requireUser(session.userId);
+  const userEmail = requireUserEmail(user, session.email);
   const price = app.prices.find((entry) => entry.lookupKey === lookupKey);
 
   if (!price) {
@@ -519,12 +580,13 @@ async function billingCheckout(
       new PutCommand({
         TableName: env.tableName,
         Item: {
-          pk: key("MEMBERSHIP", session.appId, session.email),
-          sk: key("MEMBERSHIP", session.appId, session.email),
+          pk: key("MEMBERSHIP", session.appId, session.userId),
+          sk: key("MEMBERSHIP", session.appId, session.userId),
           gsi1pk: key("APP", session.appId),
-          gsi1sk: key("MEMBERSHIP", session.email),
+          gsi1sk: key("MEMBERSHIP", userEmail),
           appId: session.appId,
-          email: session.email,
+          userId: session.userId,
+          email: userEmail,
           paid: true,
           lookupKey: price.lookupKey,
           mode: price.mode,
@@ -535,11 +597,14 @@ async function billingCheckout(
       }),
     );
 
-    return json(200, {
-      ok: true,
-      free: true,
-      lookupKey: price.lookupKey,
-    });
+    return withAllowedOrigins(
+      json(200, {
+        ok: true,
+        free: true,
+        lookupKey: price.lookupKey,
+      }),
+      app.branding.allowedOrigins,
+    );
   }
 
   if (!price.stripePriceId) {
@@ -571,20 +636,24 @@ async function billingCheckout(
     line_items: lineItems,
     metadata: {
       appId: session.appId,
-      email: session.email,
+      userId: session.userId,
+      email: userEmail,
       lookupKey: price.lookupKey,
       mode: price.mode,
       billingType: price.type,
       billingScheme: price.billingScheme,
     },
-    customer_email: session.email,
+    customer_email: userEmail,
   });
 
-  return json(200, {
-    ok: true,
-    url: checkout.url,
-    sessionId: checkout.id,
-  });
+  return withAllowedOrigins(
+    json(200, {
+      ok: true,
+      url: checkout.url,
+      sessionId: checkout.id,
+    }),
+    app.branding.allowedOrigins,
+  );
 }
 
 async function billingPortal(
@@ -592,10 +661,11 @@ async function billingPortal(
 ): Promise<APIGatewayProxyStructuredResultV2> {
   const session = await requireSession(event);
   const body = await bodyJson(event, true);
-  const membership = await getMembership(session.appId, session.email);
+  const membership = await getMembership(session.appId, session.userId);
+  const app = await requireApp(session.appId);
 
   if (!membership?.stripeCustomerId) {
-    return json(400, { error: "no_stripe_customer" });
+    return withAllowedOrigins(json(400, { error: "no_stripe_customer" }), app.branding.allowedOrigins);
   }
 
   const portal = await stripe.billingPortal.sessions.create({
@@ -603,7 +673,7 @@ async function billingPortal(
     return_url: pickRedirectUrl(body.returnUrl, env.stripeSuccessUrl),
   });
 
-  return json(200, { ok: true, url: portal.url });
+  return withAllowedOrigins(json(200, { ok: true, url: portal.url }), app.branding.allowedOrigins);
 }
 
 async function stripeWebhook(
@@ -616,10 +686,14 @@ async function stripeWebhook(
   }
 
   const stripeEvent = stripe.webhooks.constructEvent(body, signature, env.stripeWebhookSecret);
+  if (await isWebhookAlreadyProcessed(stripeEvent.id)) {
+    return json(200, { received: true, duplicate: true });
+  }
 
   if (stripeEvent.type === "checkout.session.completed") {
     const checkout = stripeEvent.data.object as Stripe.Checkout.Session;
     const appId = checkout.metadata?.appId;
+    const userId = checkout.metadata?.userId;
     const email = checkout.metadata?.email;
     const lookupKey = checkout.metadata?.lookupKey;
     const billingType =
@@ -628,16 +702,17 @@ async function stripeWebhook(
       checkout.metadata?.billingScheme === undefined ? undefined : parseBillingScheme(checkout.metadata.billingScheme);
     const mode = checkout.metadata?.mode === undefined ? undefined : parseMode(checkout.metadata.mode);
 
-    if (appId && email && lookupKey && billingType && billingScheme && mode) {
+    if (appId && userId && lookupKey && billingType && billingScheme && mode) {
       await ddb.send(
         new PutCommand({
           TableName: env.tableName,
           Item: {
-            pk: key("MEMBERSHIP", appId, email),
-            sk: key("MEMBERSHIP", appId, email),
+            pk: key("MEMBERSHIP", appId, userId),
+            sk: key("MEMBERSHIP", appId, userId),
             gsi1pk: key("APP", appId),
-            gsi1sk: key("MEMBERSHIP", email),
+            gsi1sk: key("MEMBERSHIP", email ?? userId),
             appId,
+            userId,
             email,
             paid: true,
             lookupKey,
@@ -651,6 +726,13 @@ async function stripeWebhook(
           },
         }),
       );
+
+      await putSubscriptionIndex({
+        appId,
+        userId,
+        email,
+        stripeSubscriptionId: textOrUndefined(checkout.subscription),
+      });
     }
   }
 
@@ -693,6 +775,8 @@ async function stripeWebhook(
     }
   }
 
+  await markWebhookProcessed(stripeEvent.id);
+
   return json(200, { received: true });
 }
 
@@ -701,8 +785,9 @@ async function saveProviderKey(
 ): Promise<APIGatewayProxyStructuredResultV2> {
   const session = await requireSession(event);
   const appId = text(event.pathParameters?.appId);
+  const app = await requireApp(appId);
   if (session.appId !== appId) {
-    return json(403, { error: "session_app_mismatch" });
+    return withAllowedOrigins(json(403, { error: "session_app_mismatch" }), app.branding.allowedOrigins);
   }
 
   const body = await bodyJson(event);
@@ -720,12 +805,12 @@ async function saveProviderKey(
     new PutCommand({
       TableName: env.tableName,
       Item: {
-        pk: key("PROVIDER_KEY", session.appId, session.email, provider),
-        sk: key("PROVIDER_KEY", session.appId, session.email, provider),
+        pk: key("PROVIDER_KEY", session.appId, session.userId, provider),
+        sk: key("PROVIDER_KEY", session.appId, session.userId, provider),
         gsi1pk: key("APP", session.appId),
-        gsi1sk: key("PROVIDER_KEY", session.email, provider),
+        gsi1sk: key("PROVIDER_KEY", session.userId, provider),
         appId: session.appId,
-        email: session.email,
+        userId: session.userId,
         provider,
         ciphertext: Buffer.from(ciphertext.CiphertextBlob ?? new Uint8Array()).toString("base64"),
         updatedAt: nowIso(),
@@ -733,7 +818,7 @@ async function saveProviderKey(
     }),
   );
 
-  return json(200, { ok: true });
+  return withAllowedOrigins(json(200, { ok: true }), app.branding.allowedOrigins);
 }
 
 async function llmRelay(
@@ -741,24 +826,31 @@ async function llmRelay(
 ): Promise<APIGatewayProxyStructuredResultV2> {
   const session = await requireSession(event);
   const appId = text(event.pathParameters?.appId);
-
-  if (session.appId !== appId) {
-    return json(403, { error: "session_app_mismatch" });
-  }
-
-  const membership = await getMembership(appId, session.email);
-  const request = parseLlmRelayRequest(await bodyJson(event));
   const app = await requireApp(appId);
 
+  if (session.appId !== appId) {
+    return withAllowedOrigins(json(403, { error: "session_app_mismatch" }), app.branding.allowedOrigins);
+  }
+
+  const membership = await getMembership(appId, session.userId);
+  const request = parseLlmRelayRequest(await bodyJson(event));
+
   if (!membership) {
-    return json(403, { error: "membership_missing" });
+    return withAllowedOrigins(json(403, { error: "membership_missing" }), app.branding.allowedOrigins);
   }
 
   if (!isMembershipEntitled(membership, request.mode)) {
-    return json(403, { error: membership.paid ? "mode_not_entitled" : "not_paid" });
+    return withAllowedOrigins(
+      json(403, { error: membership.paid ? "mode_not_entitled" : "not_paid" }),
+      app.branding.allowedOrigins,
+    );
   }
 
-  const apiKey = await resolveProviderKey(appId, session.email, request.provider, request.mode);
+  const entitledPrice = requireMembershipPrice(app, membership);
+  const user = await requireUser(session.userId);
+  const usageEmail = requireUserEmail(user, membership.email ?? session.email);
+
+  const apiKey = await resolveProviderKey(appId, session.userId, request.provider, request.mode);
 
   const upstream = await callProvider({
     mode: request.mode,
@@ -784,15 +876,18 @@ async function llmRelay(
   };
 
   await maybeRecordManagedUsage({
-    app,
-    membership,
+    appId,
+    email: usageEmail,
+    lookupKey: entitledPrice.lookupKey,
+    stripeCustomerId: textOrUndefined(membership.stripeCustomerId),
+    price: entitledPrice,
     mode: request.mode,
     provider: request.provider,
     model: request.model,
     usage: normalized.usage,
   });
 
-  return json(200, response);
+  return withAllowedOrigins(json(200, response), app.branding.allowedOrigins);
 }
 
 async function adminCreateApp(
@@ -802,24 +897,39 @@ async function adminCreateApp(
   const appId = text(body.appId);
   const name = text(body.name);
   const prices = readPrices(body.prices);
+  assertUniqueLookupKeys(prices);
   const branding = parseAppBranding(body.branding, name);
   const now = nowIso();
 
-  const product = await stripe.products.create({
-    name,
-    metadata: { appId },
-  });
+  const existing = await getApp(appId);
+  if (existing) {
+    return json(409, { error: "app_already_exists" });
+  }
 
-  const createdPrices: AppPrice[] = [];
-  for (const price of prices) {
-    createdPrices.push(
-      await createStripeBackedPrice({
-        appId,
-        appName: name,
-        stripeProductId: product.id,
-        price,
-      }),
-    );
+  let product: Stripe.Product | undefined;
+  let createdPrices: AppPrice[] = [];
+
+  try {
+    product = await stripe.products.create({
+      name,
+      metadata: { appId },
+    });
+
+    for (const price of prices) {
+      createdPrices.push(
+        await createStripeBackedPrice({
+          appId,
+          appName: name,
+          stripeProductId: product.id,
+          price,
+        }),
+      );
+    }
+  } catch (error) {
+    if (product) {
+      await archiveStripeArtifacts(product.id, createdPrices);
+    }
+    throw error;
   }
 
   const record: AppRecord = {
@@ -832,19 +942,24 @@ async function adminCreateApp(
     updatedAt: now,
   };
 
-  await ddb.send(
-    new PutCommand({
-      TableName: env.tableName,
-      Item: {
-        pk: key("APP", appId),
-        sk: key("APP", appId),
-        gsi1pk: "APP",
-        gsi1sk: key("APP", appId),
-        ...record,
-      },
-      ConditionExpression: "attribute_not_exists(pk)",
-    }),
-  );
+  try {
+    await ddb.send(
+      new PutCommand({
+        TableName: env.tableName,
+        Item: {
+          pk: key("APP", appId),
+          sk: key("APP", appId),
+          gsi1pk: "APP",
+          gsi1sk: key("APP", appId),
+          ...record,
+        },
+        ConditionExpression: "attribute_not_exists(pk)",
+      }),
+    );
+  } catch (error) {
+    await archiveStripeArtifacts(product.id, createdPrices);
+    throw error;
+  }
 
   return json(201, {
     ok: true,
@@ -899,17 +1014,23 @@ async function adminCreatePrices(
   const app = await requireApp(text(event.pathParameters?.appId));
   const body = await bodyJson(event);
   const prices = readPrices(body.prices);
+  assertUniqueLookupKeys([...app.prices, ...prices]);
   const created: AppPrice[] = [];
 
-  for (const price of prices) {
-    created.push(
-      await createStripeBackedPrice({
-        appId: app.appId,
-        appName: app.name,
-        stripeProductId: app.stripeProductId,
-        price,
-      }),
-    );
+  try {
+    for (const price of prices) {
+      created.push(
+        await createStripeBackedPrice({
+          appId: app.appId,
+          appName: app.name,
+          stripeProductId: app.stripeProductId,
+          price,
+        }),
+      );
+    }
+  } catch (error) {
+    await archiveStripePriceArtifacts(created);
+    throw error;
   }
 
   app.prices.push(...created);
@@ -987,16 +1108,18 @@ async function adminGrant(
   const appId = text(event.pathParameters?.appId);
   const email = normalizeEmail(event.pathParameters?.email);
   const body = await bodyJson(event, true);
+  const user = await resolveOrCreateUserByEmail(email);
 
   await ddb.send(
     new PutCommand({
       TableName: env.tableName,
       Item: {
-        pk: key("MEMBERSHIP", appId, email),
-        sk: key("MEMBERSHIP", appId, email),
+        pk: key("MEMBERSHIP", appId, user.userId),
+        sk: key("MEMBERSHIP", appId, user.userId),
         gsi1pk: key("APP", appId),
         gsi1sk: key("MEMBERSHIP", email),
         appId,
+        userId: user.userId,
         email,
         paid,
         mode: paid ? parseMode(body.mode ?? "managed") : undefined,
@@ -1073,12 +1196,22 @@ async function requireSession(event: APIGatewayProxyEventV2): Promise<SessionRec
   return {
     tokenHash: sha256(token),
     appId: stored.appId,
+    userId: stored.userId,
     email: stored.email,
     expiresAt: stored.ttl,
   };
 }
 
 async function requireApp(appId: string): Promise<AppRecord> {
+  const app = await getApp(appId);
+  if (!app) {
+    throw new Error("app_not_found");
+  }
+
+  return app;
+}
+
+async function getApp(appId: string): Promise<AppRecord | undefined> {
   const result = await ddb.send(
     new GetCommand({
       TableName: env.tableName,
@@ -1089,11 +1222,214 @@ async function requireApp(appId: string): Promise<AppRecord> {
     }),
   );
 
-  if (!result.Item) {
-    throw new Error("app_not_found");
+  return result.Item ? parseAppRecord(result.Item) : undefined;
+}
+
+async function requireUser(userId: string): Promise<UserRecord> {
+  const user = await getUser(userId);
+  if (!user) {
+    throw new Error("user_not_found");
+  }
+  return user;
+}
+
+async function getUser(userId: string): Promise<UserRecord | undefined> {
+  const result = await ddb.send(
+    new GetCommand({
+      TableName: env.tableName,
+      Key: {
+        pk: key("USER", userId),
+        sk: key("USER", userId),
+      },
+    }),
+  );
+
+  return result.Item ? parseUserRecord(result.Item) : undefined;
+}
+
+async function getEmailIdentity(email: string): Promise<IdentityRecord | undefined> {
+  return getUserIdentity("email", email);
+}
+
+async function resolveOrCreateUserByEmail(email: string): Promise<UserRecord> {
+  const existingIdentity = await getUserIdentity("email", email);
+  if (existingIdentity) {
+    return requireUser(existingIdentity.userId);
   }
 
-  return parseAppRecord(result.Item);
+  const userId = buildUserId();
+  const now = nowIso();
+
+  try {
+    await ddb.send(
+      new TransactWriteCommand({
+        TransactItems: [
+          {
+            Put: {
+              TableName: env.tableName,
+              Item: {
+                pk: key("USER", userId),
+                sk: key("USER", userId),
+                gsi1pk: "USER",
+                gsi1sk: key("USER", userId),
+                userId,
+                primaryEmail: email,
+                createdAt: now,
+                updatedAt: now,
+              },
+              ConditionExpression: "attribute_not_exists(pk)",
+            },
+          },
+          {
+            Put: {
+              TableName: env.tableName,
+              Item: buildIdentityItem({
+                userId,
+                type: "email",
+                key: email,
+                email,
+                now,
+              }),
+              ConditionExpression: "attribute_not_exists(pk)",
+            },
+          },
+        ],
+      }),
+    );
+
+    return {
+      userId,
+      primaryEmail: email,
+      createdAt: now,
+      updatedAt: now,
+    };
+  } catch (error) {
+    const identity = await getEmailIdentity(email);
+    if (identity) {
+      return requireUser(identity.userId);
+    }
+    throw error;
+  }
+}
+
+async function getUserIdentity(type: IdentityRecord["type"], identityKey: string): Promise<IdentityRecord | undefined> {
+  const result = await ddb.send(
+    new GetCommand({
+      TableName: env.tableName,
+      Key: {
+        pk: key("IDENTITY", type, identityKey),
+        sk: key("IDENTITY", type, identityKey),
+      },
+    }),
+  );
+
+  return result.Item ? parseIdentityRecord(result.Item) : undefined;
+}
+
+async function listUserIdentities(userId: string): Promise<IdentityRecord[]> {
+  const result = await ddb.send(
+    new QueryCommand({
+      TableName: env.tableName,
+      IndexName: "Gsi1",
+      KeyConditionExpression: "gsi1pk = :gsi1pk AND begins_with(gsi1sk, :prefix)",
+      ExpressionAttributeValues: {
+        ":gsi1pk": key("USER", userId),
+        ":prefix": "IDENTITY#",
+      },
+    }),
+  );
+
+  return (result.Items ?? []).map((item) => parseIdentityRecord(item));
+}
+
+async function linkIdentityToUser(input: {
+  userId: string;
+  type: IdentityRecord["type"];
+  identityKey: string;
+  email?: string;
+}): Promise<IdentityRecord> {
+  const now = nowIso();
+
+  await ddb.send(
+    new PutCommand({
+      TableName: env.tableName,
+      Item: buildIdentityItem({
+        userId: input.userId,
+        type: input.type,
+        key: input.identityKey,
+        email: input.email,
+        now,
+      }),
+      ConditionExpression: "attribute_not_exists(pk)",
+    }),
+  );
+
+  return {
+    userId: input.userId,
+    type: input.type,
+    key: input.identityKey,
+    email: input.email,
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+function buildIdentityItem(input: {
+  userId: string;
+  type: IdentityRecord["type"];
+  key: string;
+  email?: string;
+  now: string;
+}): Record<string, unknown> {
+  return {
+    pk: key("IDENTITY", input.type, input.key),
+    sk: key("IDENTITY", input.type, input.key),
+    gsi1pk: key("USER", input.userId),
+    gsi1sk: key("IDENTITY", input.type, input.key),
+    userId: input.userId,
+    type: input.type,
+    key: input.key,
+    email: input.email,
+    createdAt: input.now,
+    updatedAt: input.now,
+  };
+}
+
+async function resolveAllowedOriginsForEvent(
+  event: APIGatewayProxyEventV2,
+): Promise<string[] | undefined> {
+  const pathAppId = textOrUndefined(event.pathParameters?.appId);
+  if (pathAppId) {
+    const app = await getApp(pathAppId);
+    return app?.branding.allowedOrigins;
+  }
+
+  if (event.rawPath === "/auth/start" || event.rawPath === "/auth/verify") {
+    const body = await safeBodyJson(event);
+    const bodyAppId = textOrUndefined(body?.appId);
+    if (bodyAppId) {
+      const app = await getApp(bodyAppId);
+      return app?.branding.allowedOrigins;
+    }
+    return undefined;
+  }
+
+  if (
+    event.rawPath === "/auth/logout" ||
+    event.rawPath === "/me" ||
+    event.rawPath === "/billing/checkout" ||
+    event.rawPath === "/billing/portal"
+  ) {
+    try {
+      const session = await requireSession(event);
+      const app = await getApp(session.appId);
+      return app?.branding.allowedOrigins;
+    } catch {
+      return undefined;
+    }
+  }
+
+  return undefined;
 }
 
 async function putApp(app: AppRecord): Promise<void> {
@@ -1111,8 +1447,8 @@ async function putApp(app: AppRecord): Promise<void> {
   );
 }
 
-async function ensureMembership(appId: string, email: string): Promise<void> {
-  const existing = await getMembership(appId, email);
+async function ensureMembership(appId: string, userId: string, email?: string): Promise<void> {
+  const existing = await getMembership(appId, userId);
   if (existing) {
     return;
   }
@@ -1121,11 +1457,12 @@ async function ensureMembership(appId: string, email: string): Promise<void> {
     new PutCommand({
       TableName: env.tableName,
       Item: {
-        pk: key("MEMBERSHIP", appId, email),
-        sk: key("MEMBERSHIP", appId, email),
+        pk: key("MEMBERSHIP", appId, userId),
+        sk: key("MEMBERSHIP", appId, userId),
         gsi1pk: key("APP", appId),
-        gsi1sk: key("MEMBERSHIP", email),
+        gsi1sk: key("MEMBERSHIP", email ?? userId),
         appId,
+        userId,
         email,
         paid: false,
         updatedAt: nowIso(),
@@ -1134,13 +1471,13 @@ async function ensureMembership(appId: string, email: string): Promise<void> {
   );
 }
 
-async function getMembership(appId: string, email: string): Promise<MembershipRecord | undefined> {
+async function getMembership(appId: string, userId: string): Promise<MembershipRecord | undefined> {
   const result = await ddb.send(
     new GetCommand({
       TableName: env.tableName,
       Key: {
-        pk: key("MEMBERSHIP", appId, email),
-        sk: key("MEMBERSHIP", appId, email),
+        pk: key("MEMBERSHIP", appId, userId),
+        sk: key("MEMBERSHIP", appId, userId),
       },
     }),
   );
@@ -1151,6 +1488,24 @@ async function getMembership(appId: string, email: string): Promise<MembershipRe
 async function findMembershipBySubscriptionId(
   stripeSubscriptionId: string,
 ): Promise<MembershipRecord | undefined> {
+  const indexed = await ddb.send(
+    new GetCommand({
+      TableName: env.tableName,
+      Key: {
+        pk: key("SUBSCRIPTION", stripeSubscriptionId),
+        sk: key("SUBSCRIPTION", stripeSubscriptionId),
+      },
+    }),
+  );
+
+  if (indexed.Item) {
+    const appId = textOrUndefined(indexed.Item.appId);
+    const userId = textOrUndefined(indexed.Item.userId);
+    if (appId && userId) {
+      return getMembership(appId, userId);
+    }
+  }
+
   const result = await ddb.send(
     new ScanCommand({
       TableName: env.tableName,
@@ -1163,7 +1518,13 @@ async function findMembershipBySubscriptionId(
   );
 
   const item = result.Items?.[0];
-  return item ? parseMembershipRecord(item) : undefined;
+  if (!item) {
+    return undefined;
+  }
+
+  const membership = parseMembershipRecord(item);
+  await putSubscriptionIndex(membership);
+  return membership;
 }
 
 async function updateMembershipPaymentState(
@@ -1175,11 +1536,12 @@ async function updateMembershipPaymentState(
     new PutCommand({
       TableName: env.tableName,
       Item: {
-        pk: key("MEMBERSHIP", membership.appId, membership.email),
-        sk: key("MEMBERSHIP", membership.appId, membership.email),
+        pk: key("MEMBERSHIP", membership.appId, membership.userId),
+        sk: key("MEMBERSHIP", membership.appId, membership.userId),
         gsi1pk: key("APP", membership.appId),
-        gsi1sk: key("MEMBERSHIP", membership.email),
+        gsi1sk: key("MEMBERSHIP", membership.email ?? membership.userId),
         appId: membership.appId,
+        userId: membership.userId,
         email: membership.email,
         paid,
         lookupKey: membership.lookupKey,
@@ -1193,11 +1555,114 @@ async function updateMembershipPaymentState(
       },
     }),
   );
+
+  await putSubscriptionIndex({
+    appId: membership.appId,
+    userId: membership.userId,
+    email: membership.email,
+    stripeSubscriptionId: membership.stripeSubscriptionId,
+  });
+}
+
+async function putSubscriptionIndex(input: {
+  appId: string;
+  userId: string;
+  email?: string;
+  stripeSubscriptionId?: string;
+}): Promise<void> {
+  if (!input.stripeSubscriptionId) {
+    return;
+  }
+
+  await ddb.send(
+    new PutCommand({
+      TableName: env.tableName,
+      Item: {
+        pk: key("SUBSCRIPTION", input.stripeSubscriptionId),
+        sk: key("SUBSCRIPTION", input.stripeSubscriptionId),
+        gsi1pk: key("APP", input.appId),
+        gsi1sk: key("SUBSCRIPTION", input.email ?? input.userId),
+        appId: input.appId,
+        userId: input.userId,
+        email: input.email,
+        stripeSubscriptionId: input.stripeSubscriptionId,
+        updatedAt: nowIso(),
+      },
+    }),
+  );
+}
+
+async function isWebhookAlreadyProcessed(eventId: string): Promise<boolean> {
+  const result = await ddb.send(
+    new GetCommand({
+      TableName: env.tableName,
+      Key: {
+        pk: key("WEBHOOK", eventId),
+        sk: key("WEBHOOK", eventId),
+      },
+    }),
+  );
+
+  return result.Item?.processed === true;
+}
+
+async function markWebhookProcessed(eventId: string): Promise<void> {
+  try {
+    await ddb.send(
+      new PutCommand({
+        TableName: env.tableName,
+        Item: {
+          pk: key("WEBHOOK", eventId),
+          sk: key("WEBHOOK", eventId),
+          gsi1pk: "WEBHOOK",
+          gsi1sk: key("WEBHOOK", eventId),
+          stripeEventId: eventId,
+          processed: true,
+          createdAt: nowIso(),
+          ttl: ttlFromNow(30 * 24 * 60 * 60),
+        },
+        ConditionExpression: "attribute_not_exists(pk)",
+      }),
+    );
+  } catch (error) {
+    if (isConditionalWriteFailure(error)) {
+      return;
+    }
+    throw error;
+  }
+}
+
+async function archiveStripeArtifacts(
+  stripeProductId: string,
+  prices: AppPrice[],
+): Promise<void> {
+  await archiveStripePriceArtifacts(prices);
+
+  try {
+    await stripe.products.update(stripeProductId, { active: false });
+  } catch {}
+}
+
+async function archiveStripePriceArtifacts(prices: AppPrice[]): Promise<void> {
+  const seenPriceIds = new Set<string>();
+
+  for (const price of prices) {
+    for (const priceId of [price.stripePriceId, price.stripeBasePriceId]) {
+      if (!priceId || seenPriceIds.has(priceId)) {
+        continue;
+      }
+      seenPriceIds.add(priceId);
+
+      try {
+        await stripe.prices.update(priceId, { active: false });
+      } catch {}
+    }
+  }
 }
 
 async function resolveProviderKey(
   appId: string,
-  email: string,
+  userId: string,
   provider: Provider,
   mode: Mode,
 ): Promise<string> {
@@ -1212,8 +1677,8 @@ async function resolveProviderKey(
     new GetCommand({
       TableName: env.tableName,
       Key: {
-        pk: key("PROVIDER_KEY", appId, email, provider),
-        sk: key("PROVIDER_KEY", appId, email, provider),
+        pk: key("PROVIDER_KEY", appId, userId, provider),
+        sk: key("PROVIDER_KEY", appId, userId, provider),
       },
     }),
   );
@@ -1388,12 +1853,26 @@ async function bodyJson(
   return JSON.parse(raw) as JsonRecord;
 }
 
+async function safeBodyJson(
+  event: APIGatewayProxyEventV2,
+): Promise<JsonRecord | undefined> {
+  try {
+    return await bodyJson(event, true);
+  } catch {
+    return undefined;
+  }
+}
+
 function randomNumericCode(): string {
   return String(Math.floor(100000 + Math.random() * 900000));
 }
 
 function randomToken(): string {
   return randomBytes(32).toString("base64url");
+}
+
+function buildUserId(): string {
+  return "usr_" + randomBytes(12).toString("hex");
 }
 
 function sha256(value: string): string {
@@ -1629,8 +2108,11 @@ async function createStripeBackedPrice(input: {
 }
 
 async function maybeRecordManagedUsage(input: {
-  app: AppRecord;
-  membership: MembershipRecord;
+  appId: string;
+  email: string;
+  lookupKey: string;
+  stripeCustomerId?: string;
+  price: AppPrice;
   mode: Mode;
   provider: Provider;
   model: string;
@@ -1646,20 +2128,22 @@ async function maybeRecordManagedUsage(input: {
     return;
   }
 
+  if (input.price.billingScheme !== "metered") {
+    return;
+  }
+
   const totalTokens = input.usage?.totalTokens ?? mergeUsageTotals(input.usage);
   if (!totalTokens || totalTokens <= 0) {
     return;
   }
+
   const now = nowIso();
-  const price = input.membership.lookupKey
-    ? input.app.prices.find((entry) => entry.lookupKey === input.membership.lookupKey)
-    : undefined;
-  const billedUnits = price?.includedUsageUnits
-    ? Math.ceil(totalTokens / price.includedUsageUnits)
+  const billedUnits = input.price.includedUsageUnits
+    ? Math.ceil(totalTokens / input.price.includedUsageUnits)
     : totalTokens;
 
   const requestId = randomToken();
-  const usageKey = key("USAGE", input.app.appId, input.membership.email, requestId);
+  const usageKey = key("USAGE", input.appId, input.email, requestId);
 
   await ddb.send(
     new PutCommand({
@@ -1667,18 +2151,20 @@ async function maybeRecordManagedUsage(input: {
       Item: {
         pk: usageKey,
         sk: usageKey,
-        gsi1pk: key("APP", input.app.appId),
-        gsi1sk: key("USAGE", input.membership.email, nowIso()),
-        appId: input.app.appId,
-        email: input.membership.email,
+        gsi1pk: key("APP", input.appId),
+        gsi1sk: key("USAGE", input.email, now),
+        appId: input.appId,
+        email: input.email,
         provider: input.provider,
         model: input.model,
-        lookupKey: input.membership.lookupKey,
-        meterEventName: price?.meterEventName,
+        lookupKey: input.lookupKey,
+        meterEventName: input.price.meterEventName,
         tokenCount: totalTokens,
         billedUnits,
         reportedToStripe: true,
         reportedAt: now,
+        billingSource: "stripe_ai_gateway",
+        stripeCustomerId: input.stripeCustomerId,
         createdAt: now,
       },
     }),
@@ -1708,6 +2194,46 @@ function mergeUsageTotals(
   return total > 0 ? total : undefined;
 }
 
+function requireMembershipPrice(app: AppRecord, membership: MembershipRecord): AppPrice {
+  if (!membership.lookupKey || !membership.mode || !membership.billingType || !membership.billingScheme) {
+    throw new Error("invalid_membership");
+  }
+
+  const price = app.prices.find((entry) => entry.lookupKey === membership.lookupKey);
+  if (!price) {
+    throw new Error("membership_price_not_found");
+  }
+
+  if (
+    price.mode !== membership.mode ||
+    price.type !== membership.billingType ||
+    price.billingScheme !== membership.billingScheme
+  ) {
+    throw new Error("membership_price_mismatch");
+  }
+
+  return price;
+}
+
+function assertUniqueLookupKeys(prices: AppPrice[]): void {
+  const seen = new Set<string>();
+  for (const price of prices) {
+    if (seen.has(price.lookupKey)) {
+      throw new Error("duplicate_lookup_key");
+    }
+    seen.add(price.lookupKey);
+  }
+}
+
+function isConditionalWriteFailure(error: unknown): boolean {
+  return Boolean(
+    error &&
+      typeof error === "object" &&
+      "name" in error &&
+      (error as { name?: unknown }).name === "ConditionalCheckFailedException",
+  );
+}
+
 function buildMeterEventName(appId: string, lookupKey: string): string {
   return `paywallm_${slugForStripe(appId)}_${slugForStripe(lookupKey)}_${randomBytes(4).toString("hex")}`;
 }
@@ -1724,6 +2250,7 @@ function renderPaywallHtml(input: {
   cancelUrl: string;
   returnUrl: string;
   checkoutState: string;
+  sessionTransport: SessionTransport;
   preview?: {
     enabled: boolean;
     email: string;
@@ -1754,6 +2281,7 @@ function renderPaywallHtml(input: {
     cancelUrl: input.cancelUrl,
     returnUrl: input.returnUrl,
     checkoutState: input.checkoutState,
+    sessionTransport: input.sessionTransport,
     preview: input.preview,
   });
 
@@ -1885,6 +2413,27 @@ function renderPaywallHtml(input: {
       }
       .status:empty {
         display: none;
+      }
+      .callout {
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 14px 16px;
+        background: color-mix(in srgb, var(--primary) 8%, var(--surface));
+      }
+      .callout h3 {
+        margin: 0 0 6px;
+        font-size: 15px;
+      }
+      .callout p {
+        margin: 0;
+        font-size: 14px;
+        color: var(--muted);
+      }
+      .callout-actions {
+        margin-top: 12px;
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
       }
       .row, form {
         display: grid;
@@ -2051,6 +2600,13 @@ function renderPaywallHtml(input: {
         </section>
         <section class="content">
           <div id="status" class="status" aria-live="polite"></div>
+          <div id="returnGuidance" class="callout hidden">
+            <h3 id="returnGuidanceTitle">Return to your app</h3>
+            <p id="returnGuidanceBody"></p>
+            <div class="callout-actions">
+              <a id="returnLink" class="secondary hidden" href="#" style="text-decoration:none;display:inline-flex;align-items:center;">Return to app</a>
+            </div>
+          </div>
           <section class="step" id="signInStep">
             <div class="step-head" id="authHeader">
               <div>
@@ -2070,7 +2626,10 @@ function renderPaywallHtml(input: {
                 <label for="code">Code</label>
                 <input id="code" inputmode="numeric" pattern="[0-9]*" required />
               </div>
-              <button class="primary" type="submit">Verify</button>
+              <div class="account-actions">
+                <button class="primary" type="submit">Verify</button>
+                <button class="secondary" id="resendCodeButton" type="button">Resend code</button>
+              </div>
             </form>
             <div id="signedInRow" class="hidden auth-inline">
               <div id="signedInNote" class="subtle"></div>
@@ -2097,9 +2656,11 @@ function renderPaywallHtml(input: {
     <script>
       const bootstrap = ${bootstrap};
       const storageKey = "paywallmSessionToken:" + bootstrap.appId;
+      const usesTokenTransport = bootstrap.sessionTransport === "token" || bootstrap.sessionTransport === "both";
+      const usesCookieTransport = bootstrap.sessionTransport === "cookie" || bootstrap.sessionTransport === "both";
       const state = {
         email: bootstrap.prefillEmail || "",
-        token: sessionStorage.getItem(storageKey) || "",
+        token: usesTokenTransport ? (sessionStorage.getItem(storageKey) || "") : "",
         me: null,
       };
 
@@ -2116,6 +2677,11 @@ function renderPaywallHtml(input: {
       const emailInput = document.getElementById("email");
       const codeInput = document.getElementById("code");
       const logoutLink = document.getElementById("logoutLink");
+      const resendCodeButton = document.getElementById("resendCodeButton");
+      const returnGuidance = document.getElementById("returnGuidance");
+      const returnGuidanceTitle = document.getElementById("returnGuidanceTitle");
+      const returnGuidanceBody = document.getElementById("returnGuidanceBody");
+      const returnLink = document.getElementById("returnLink");
 
       document.documentElement.dataset.theme = bootstrap.branding.preferredTheme;
       emailInput.value = state.email;
@@ -2135,6 +2701,43 @@ function renderPaywallHtml(input: {
         emit("resize", { height: document.documentElement.scrollHeight });
       }
 
+      function renderReturnGuidance() {
+        if (!returnGuidance || !returnGuidanceTitle || !returnGuidanceBody || !returnLink) {
+          return;
+        }
+
+        const hasReturnUrl = Boolean(bootstrap.returnUrl);
+        const checkoutState = bootstrap.checkoutState;
+        const show = hasReturnUrl || checkoutState === "success" || checkoutState === "cancel";
+        returnGuidance.classList.toggle("hidden", !show);
+        if (!show) {
+          return;
+        }
+
+        if (checkoutState === "success") {
+          returnGuidanceTitle.textContent = "Purchase complete";
+          returnGuidanceBody.textContent = hasReturnUrl
+            ? "Your purchase is complete. Return to your app to continue."
+            : "Your purchase is complete. You can close this page and return to your app.";
+        } else if (checkoutState === "cancel") {
+          returnGuidanceTitle.textContent = "Checkout canceled";
+          returnGuidanceBody.textContent = hasReturnUrl
+            ? "No charge was made. Return to your app when you're ready."
+            : "No charge was made. You can close this page and return to your app.";
+        } else {
+          returnGuidanceTitle.textContent = "Return to your app";
+          returnGuidanceBody.textContent = "After you finish here, head back to your app to continue.";
+        }
+
+        if (hasReturnUrl) {
+          returnLink.href = bootstrap.returnUrl;
+          returnLink.classList.remove("hidden");
+        } else {
+          returnLink.classList.add("hidden");
+          returnLink.removeAttribute("href");
+        }
+      }
+
       async function api(path, method, body, useAuth) {
         if (bootstrap.preview && bootstrap.preview.enabled) {
           throw new Error("Preview mode: action disabled.");
@@ -2147,7 +2750,7 @@ function renderPaywallHtml(input: {
           method,
           headers,
           body: body === undefined ? undefined : JSON.stringify(body),
-          credentials: "same-origin",
+          credentials: usesCookieTransport ? "same-origin" : "omit",
         });
         const text = await response.text();
         let parsed = {};
@@ -2350,12 +2953,40 @@ function renderPaywallHtml(input: {
 
         authTitle.textContent = "";
         authSubtitle.textContent = "";
-        signedInNote.textContent = "Signed in as " + state.me.email + ".";
+        const signedInEmail =
+          (state.me.user && state.me.user.profileEmail) ||
+          (state.me.session && state.me.session.loginIdentity && state.me.session.loginIdentity.email) ||
+          "";
+        signedInNote.innerHTML = "Signed in as <strong>" + escapeHtmlJs(signedInEmail) + "</strong>.";
         renderPlans();
       }
 
+      async function sendLoginCode() {
+        state.email = emailInput.value.trim();
+        if (!state.email) {
+          setStatus("Enter your email first.", true);
+          return;
+        }
+
+        try {
+          if (resendCodeButton) {
+            resendCodeButton.setAttribute("disabled", "disabled");
+          }
+          await api("/auth/start", "POST", { appId: bootstrap.appId, email: state.email }, false);
+          verifyForm.classList.remove("hidden");
+          setStatus("Code sent. Check your email.", false);
+          emit("ready", { appId: bootstrap.appId });
+        } catch (error) {
+          setStatus(error.message || "Something went wrong. Please try again.", true);
+        } finally {
+          if (resendCodeButton) {
+            resendCodeButton.removeAttribute("disabled");
+          }
+        }
+      }
+
       async function loadMe() {
-        if (!state.token) {
+        if (!usesCookieTransport && !state.token) {
           state.me = null;
           renderAccount();
           return;
@@ -2364,9 +2995,18 @@ function renderPaywallHtml(input: {
           state.me = await api("/me", "GET", undefined, true);
           renderAccount();
           setStatus("", false);
-          emit("auth_success", { email: state.me.email, membership: state.me.membership || null });
+          emit("auth_success", {
+            profileEmail: state.me.user ? state.me.user.profileEmail || null : null,
+            loginEmail:
+              state.me.session && state.me.session.loginIdentity
+                ? state.me.session.loginIdentity.email || null
+                : null,
+            membership: state.me.membership || null,
+          });
         } catch (error) {
-          sessionStorage.removeItem(storageKey);
+          if (usesTokenTransport) {
+            sessionStorage.removeItem(storageKey);
+          }
           state.token = "";
           state.me = null;
           renderAccount();
@@ -2398,15 +3038,7 @@ function renderPaywallHtml(input: {
 
       startForm.addEventListener("submit", async (event) => {
         event.preventDefault();
-        state.email = emailInput.value.trim();
-        try {
-          await api("/auth/start", "POST", { appId: bootstrap.appId, email: state.email }, false);
-          verifyForm.classList.remove("hidden");
-          setStatus("Code sent. Check your email.", false);
-          emit("ready", { appId: bootstrap.appId });
-        } catch (error) {
-          setStatus(error.message || "Something went wrong. Please try again.", true);
-        }
+        await sendLoginCode();
       });
 
       verifyForm.addEventListener("submit", async (event) => {
@@ -2416,14 +3048,25 @@ function renderPaywallHtml(input: {
             appId: bootstrap.appId,
             email: state.email,
             code: codeInput.value.trim(),
+            sessionTransport: bootstrap.sessionTransport,
           }, false);
           state.token = result.sessionToken || "";
-          sessionStorage.setItem(storageKey, state.token);
+          if (usesTokenTransport && state.token) {
+            sessionStorage.setItem(storageKey, state.token);
+          } else {
+            sessionStorage.removeItem(storageKey);
+          }
           await loadMe();
         } catch (error) {
           setStatus(error.message || "That code didn't work. Please try again.", true);
         }
       });
+
+      if (resendCodeButton) {
+        resendCodeButton.addEventListener("click", async () => {
+          await sendLoginCode();
+        });
+      }
 
       logoutLink.addEventListener("click", async (event) => {
         event.preventDefault();
@@ -2474,6 +3117,7 @@ function renderPaywallHtml(input: {
 
       renderPlans();
       renderAccount();
+      renderReturnGuidance();
       if (bootstrap.preview && bootstrap.preview.enabled) {
         const previewMode = bootstrap.preview.mode || "managed";
         const previewPrice =
@@ -2915,6 +3559,32 @@ function textOrUndefined(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
+function requireUserEmail(user: UserRecord, fallback?: string): string {
+  const email = user.primaryEmail ?? fallback;
+  if (!email) {
+    throw new Error("user_email_missing");
+  }
+  return email;
+}
+
+function parseSessionTransport(value: unknown): SessionTransport {
+  if (value === undefined || value === "cookie") {
+    return "cookie";
+  }
+  if (value === "token" || value === "both") {
+    return value;
+  }
+  throw new Error("invalid_session_transport");
+}
+
+function paywallSessionTransport(value: unknown, embed: boolean): SessionTransport {
+  if (value === undefined) {
+    return embed ? "token" : "cookie";
+  }
+
+  return parseSessionTransport(value);
+}
+
 function normalizeEmail(value: unknown): string {
   return text(value).trim().toLowerCase();
 }
@@ -2945,16 +3615,37 @@ function withCors(
   response: APIGatewayProxyStructuredResultV2,
 ): APIGatewayProxyStructuredResultV2 {
   const origin = event.headers.origin ?? event.headers.Origin;
+  const responseHeaders = { ...(response.headers as Record<string, string> | undefined) };
+  const allowedOriginsHeader = responseHeaders["x-paywallm-allowed-origins"];
+  delete responseHeaders["x-paywallm-allowed-origins"];
+  const allowedOrigins = allowedOriginsHeader
+    ? allowedOriginsHeader
+        .split(",")
+        .map((value) => value.trim())
+        .filter(Boolean)
+    : undefined;
+  const allowOrigin =
+    origin && origin.length > 0
+      ? !allowedOrigins || allowedOrigins.includes(origin)
+        ? origin
+        : undefined
+      : allowedOrigins
+        ? undefined
+        : "*";
+
   const headers: Record<string, string> = {
     "access-control-allow-headers": "content-type,authorization",
     "access-control-allow-methods": "GET,POST,PATCH,OPTIONS",
-    "access-control-allow-origin": origin && origin.length > 0 ? origin : "*",
     "access-control-expose-headers": "set-cookie",
     vary: "Origin",
-    ...(response.headers as Record<string, string> | undefined),
+    ...responseHeaders,
   };
 
-  if (origin && origin.length > 0) {
+  if (allowOrigin) {
+    headers["access-control-allow-origin"] = allowOrigin;
+  }
+
+  if (origin && origin.length > 0 && allowOrigin) {
     headers["access-control-allow-credentials"] = "true";
   }
 
@@ -2969,7 +3660,9 @@ function statusForError(message: string): number {
     message === "missing_body" ||
     message === "invalid_string" ||
     message === "price_not_found" ||
-    message === "invalid_limit"
+    message === "invalid_limit" ||
+    message === "duplicate_lookup_key" ||
+    message === "invalid_session_transport"
   ) {
     return 400;
   }
@@ -2977,7 +3670,11 @@ function statusForError(message: string): number {
   if (
     message === "missing_byok_provider_key" ||
     message === "managed_provider_unsupported" ||
-    message === "missing_stripe_customer"
+    message === "missing_stripe_customer" ||
+    message === "invalid_membership" ||
+    message === "membership_price_not_found" ||
+    message === "membership_price_mismatch" ||
+    message === "user_email_missing"
   ) {
     return 400;
   }
@@ -3001,8 +3698,12 @@ function statusForError(message: string): number {
     return 403;
   }
 
-  if (message === "app_not_found" || message === "not_found") {
+  if (message === "app_not_found" || message === "not_found" || message === "user_not_found") {
     return 404;
+  }
+
+  if (message === "app_already_exists") {
+    return 409;
   }
 
   if (message === "login_locked" || message === "login_code_recently_sent") {
@@ -3024,6 +3725,23 @@ function billedUnitAmount(price: AppPrice): number {
   const premiumPercent = price.billingPremiumPercent ?? 0;
   const multiplier = 1 + premiumPercent / 100;
   return Math.ceil(price.unitAmountUsd * multiplier);
+}
+
+function withAllowedOrigins(
+  response: APIGatewayProxyStructuredResultV2,
+  allowedOrigins: string[] | undefined,
+): APIGatewayProxyStructuredResultV2 {
+  if (!allowedOrigins) {
+    return response;
+  }
+
+  return {
+    ...response,
+    headers: {
+      ...(response.headers as Record<string, string> | undefined),
+      "x-paywallm-allowed-origins": allowedOrigins.join(","),
+    },
+  };
 }
 
 function isFreeByokPrice(price: AppPrice): boolean {

@@ -323,7 +323,7 @@ Returns recent usage ledger rows including:
 - billable units after token bucketing
 - billed unit rate in cents
 - estimated charge in cents
-- whether the meter event was reported to Stripe
+- whether usage was recorded via Stripe AI Gateway billing
 
 ### `paywallm revoke <appId> <email>`
 
@@ -364,18 +364,19 @@ From the end user perspective, the flow is:
 2. Your client calls `POST /auth/start` with `appId` and `email`.
 3. The service sends a login code by email (or echoes it in dev mode).
 4. Your client calls `POST /auth/verify` with `appId`, `email`, and `code`.
-5. The service returns a session token (and also sets a cookie for browser use).
+5. The service creates a session using either cookie transport, token transport, or both.
 6. Your client can call `GET /me` to see the user state for that app.
 7. If they need paid access, your client calls `POST /billing/checkout` with one of the app's `lookupKey` values.
 8. Stripe handles checkout.
 9. Stripe webhook updates the user's entitlement record.
 10. Your client calls `POST /v1/apps/:appId/llm` to relay model requests using either the user's key or your managed key.
 
-Everything is app-scoped and email-scoped:
+Everything is app-scoped for billing and entitlement, with a stable internal user account behind each login identity:
 
-- one email can have different entitlements in different apps
+- one user can have different entitlements in different apps
 - one app can offer both `byok` and `managed` prices
 - users can store their own provider keys for BYOK mode
+- email-code login is the current identity method, but the storage model is ready for future linked identities such as OAuth
 
 ## User-Facing API Summary
 
@@ -440,6 +441,7 @@ Useful query params:
 
 - `embed=1` renders a tighter iframe-friendly layout
 - `email=user@example.com` pre-fills the email field
+- `session_transport=cookie|token|both` overrides the paywall auth transport
 - `success_url=https://app.example.com/billing/success`
 - `cancel_url=https://app.example.com/billing/cancel`
 - `return_url=https://app.example.com/account`
@@ -494,6 +496,7 @@ Optional query params:
 - `limit=50`
 
 This returns the recent usage ledger entries written after successful LLM relay calls for that app.
+For managed metered plans, these rows represent requests whose usage was recorded through Stripe AI Gateway-backed billing.
 
 ## License
 
@@ -527,6 +530,12 @@ https://your-paywall-domain.example.com/p/<appId>
 
 This mode avoids iframe layout issues and is the best default choice.
 
+Session behavior for this mode:
+
+- default paywall transport is `cookie`
+- `/auth/verify` sets `paywallm_session` and does not need to expose a bearer token to browser JavaScript
+- subsequent hosted paywall requests use the cookie automatically
+
 ### Option 2: Embedded Iframe Paywall
 
 Use this when you want the paywall inside an in-app modal or settings panel.
@@ -536,6 +545,8 @@ Use this when you want the paywall inside an in-app modal or settings panel.
 ```text
 /p/<appId>?embed=1
 ```
+
+Iframe mode defaults to `session_transport=token` because third-party cookies are not reliable across browsers.
 
 2. If you already know the user email, pass it in the URL or send it after load:
 
@@ -562,6 +573,12 @@ Use this when you want the paywall inside an in-app modal or settings panel.
 5. When you receive `resize`, update the iframe height so the embedded page fits cleanly.
 6. When you receive `checkout_started`, expect the browser to leave the iframe context and go to Stripe Checkout.
 7. After Stripe returns to your supplied success or cancel URL, either reopen the iframe or send the user back into your normal app flow.
+
+`auth_success` payload fields:
+
+- `profileEmail`: canonical user-facing email for the account
+- `loginEmail`: email used for the current login identity
+- `membership`: current membership snapshot
 
 Minimal parent-page sketch:
 
@@ -600,6 +617,22 @@ Minimal parent-page sketch:
 - Use iframe mode for desktop web apps that want a modal-style billing/auth surface.
 - Keep your app branding in Paywallm app config instead of rebuilding the paywall UI separately in each product.
 
+### Native App Workflow
+
+Use this for iOS, Android, desktop app shells, or Unity.
+
+1. Call `POST /auth/start`.
+2. Call `POST /auth/verify` with `"sessionTransport": "token"`.
+3. Store the returned bearer token in the platform secure store.
+4. Send `Authorization: Bearer <sessionToken>` on `/me`, `/billing/checkout`, `/billing/portal`, `/v1/apps/:appId/keys`, and `/v1/apps/:appId/llm`.
+5. On logout, call `POST /auth/logout` with the same bearer token and clear local storage.
+
+Practical notes:
+
+- do not rely on cookies for native webviews, embedded browsers, or Unity clients
+- Stripe Checkout handoff and return should be handled with your platform's normal browser/deep-link flow
+- if you present the hosted paywall inside a webview, prefer `session_transport=token`
+
 ### `POST /v1/apps/:appId/keys`
 
 This stores a user's encrypted BYOK provider key for a specific app.
@@ -607,7 +640,7 @@ This stores a user's encrypted BYOK provider key for a specific app.
 Authentication:
 
 - send `Authorization: Bearer <sessionToken>`, or
-- use the `paywallm_session` cookie from `/auth/verify`
+- use the `paywallm_session` cookie from `/auth/verify` when the session was created with cookie transport
 
 Request body:
 
@@ -673,7 +706,64 @@ This is the LLM relay endpoint.
 Authentication:
 
 - send `Authorization: Bearer <sessionToken>`, or
-- use the `paywallm_session` cookie from `/auth/verify`
+- use the `paywallm_session` cookie from `/auth/verify` when the session was created with cookie transport
+
+### `POST /auth/verify`
+
+Verifies an emailed login code and creates a session.
+
+Request body:
+
+```json
+{
+  "appId": "game-a",
+  "email": "user@example.com",
+  "code": "123456",
+  "sessionTransport": "token"
+}
+```
+
+`sessionTransport` options:
+
+- `cookie`: sets the `paywallm_session` cookie and does not return `sessionToken`
+- `token`: returns `sessionToken` and does not set a cookie
+- `both`: sets the cookie and also returns `sessionToken`
+
+Recommended transport by client type:
+
+- full-page web: `cookie`
+- iframe embed: `token`
+- mobile app / desktop shell / Unity: `token`
+
+### `GET /me`
+
+Returns the current app-scoped session, user, membership, and app state.
+
+Response shape:
+
+```json
+{
+  "appId": "game-a",
+  "user": {
+    "userId": "usr_123",
+    "profileEmail": "user@example.com"
+  },
+  "session": {
+    "loginIdentity": {
+      "type": "email",
+      "email": "user@example.com"
+    }
+  },
+  "membership": {},
+  "app": {}
+}
+```
+
+Notes:
+
+- `user.profileEmail` is the user-facing/canonical email for the account
+- `session.loginIdentity.email` is the email used for this login flow
+- these are the same today for email-code login, but the API is now shaped so future OAuth identities do not require another breaking redesign
 
 Request body:
 
@@ -782,6 +872,5 @@ What still needs hardening before serious production use:
 - stricter entitlement validation rules
 - a better model for multiple active products/prices per app
 - request validation
-- webhook event idempotency
 - usage metering and rate limiting
 - deeper audit logging
