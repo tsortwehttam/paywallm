@@ -1952,7 +1952,8 @@ function renderPaywallHtml(input: {
         border: 1px solid var(--border);
         border-radius: 16px;
         padding: 16px;
-        display: grid;
+        display: flex;
+        flex-direction: column;
         gap: 10px;
       }
       .plan.active {
@@ -1962,6 +1963,12 @@ function renderPaywallHtml(input: {
       .price {
         font-size: 28px;
         font-weight: 800;
+      }
+      .price-subline {
+        margin-top: -4px;
+      }
+      .plan-select {
+        margin-top: auto;
       }
       .byok-inline {
         display: grid;
@@ -2025,8 +2032,8 @@ function renderPaywallHtml(input: {
             <div class="step-head">
               <span class="step-num">1</span>
               <div>
-                <h2>Sign In</h2>
-                <div class="subtle">${escapeHtml(copy?.accessSubtitle ?? "Use your email to get a sign-in code.")}</div>
+                <h2 id="authTitle">Sign In</h2>
+                <div class="subtle" id="authSubtitle">${escapeHtml(copy?.accessSubtitle ?? "Use your email to get a sign-in code.")}</div>
               </div>
             </div>
             <form id="startForm" class="inline">
@@ -2044,6 +2051,9 @@ function renderPaywallHtml(input: {
               <button class="primary" type="submit">Verify</button>
             </form>
             <div id="signedInNote" class="hidden subtle"></div>
+            <div class="account-actions hidden" id="authActions">
+              <button class="secondary" id="logoutButton" type="button">Log Out</button>
+            </div>
           </section>
           <section class="step hidden" id="plansStep">
             <div class="step-head">
@@ -2066,11 +2076,9 @@ function renderPaywallHtml(input: {
             </div>
             <div class="account-actions">
               <button class="secondary" id="portalButton" type="button">Manage Billing</button>
-              <button class="secondary" id="logoutButton" type="button">Log Out</button>
             </div>
           </section>
           <div class="trust">
-            <span class="pill">Secure checkout</span>
             <span class="pill">Payments handled by Stripe</span>
             ${input.app.branding.legalText ? `<span>${escapeHtml(input.app.branding.legalText)}</span>` : ""}
           </div>
@@ -2090,6 +2098,9 @@ function renderPaywallHtml(input: {
       const startForm = document.getElementById("startForm");
       const verifyForm = document.getElementById("verifyForm");
       const signedInNote = document.getElementById("signedInNote");
+      const authTitle = document.getElementById("authTitle");
+      const authSubtitle = document.getElementById("authSubtitle");
+      const authActions = document.getElementById("authActions");
       const plansStep = document.getElementById("plansStep");
       const accountStep = document.getElementById("accountStep");
       const accountSummary = document.getElementById("accountSummary");
@@ -2168,6 +2179,19 @@ function renderPaywallHtml(input: {
         return dollars + " one-time";
       }
 
+      function formatManagedMeteredTokenLine(price) {
+        if (price.mode !== "managed" || price.billingScheme !== "metered" || !price.includedUsageUnits) {
+          return undefined;
+        }
+        const amount =
+          typeof price.billedUnitAmountUsd === "number"
+            ? price.billedUnitAmountUsd
+            : typeof price.unitAmountUsd === "number"
+              ? price.unitAmountUsd
+              : 0;
+        return "$" + (amount / 100).toFixed(2) + " per " + price.includedUsageUnits.toLocaleString() + " tokens";
+      }
+
       function renderPlans() {
         plansNode.innerHTML = "";
         const membership = state.me && state.me.membership;
@@ -2186,35 +2210,44 @@ function renderPaywallHtml(input: {
           title.innerHTML = "<strong>" + escapeHtmlJs(price.mode === "byok" ? "Use Your Own Key" : "All Included") + "</strong>";
           const amount = document.createElement("div");
           amount.className = "price";
-          amount.textContent = formatPrice(price);
+          const meteredTokenLine = formatManagedMeteredTokenLine(price);
+          const hasBaseSubscriptionAmount = typeof price.baseSubscriptionAmountUsd === "number" && price.baseSubscriptionAmountUsd > 0;
+          if (meteredTokenLine && hasBaseSubscriptionAmount) {
+            amount.textContent = "$" + (price.baseSubscriptionAmountUsd / 100).toFixed(2) + "/" + (price.interval || "month");
+          } else {
+            amount.textContent = formatPrice(price);
+          }
+          const amountSubline = document.createElement("div");
+          amountSubline.className = "tiny price-subline";
+          amountSubline.textContent = meteredTokenLine && hasBaseSubscriptionAmount ? meteredTokenLine : "";
+          amountSubline.classList.toggle("hidden", !(meteredTokenLine && hasBaseSubscriptionAmount));
           const meta = document.createElement("div");
           meta.className = "tiny";
           if (price.billingScheme === "metered") {
-            meta.textContent = "Pay for what you use";
+            meta.textContent = "We'll provide the AI agent";
           } else if (price.type === "subscription") {
             meta.textContent =
               price.mode === "byok"
-                ? (bootstrap.branding.copy && bootstrap.branding.copy.byokSubscriptionLabel) || "Billed automatically"
+                ? (bootstrap.branding.copy && bootstrap.branding.copy.byokSubscriptionLabel) || "Developer? Provide your own agent API key"
                 : (bootstrap.branding.copy && bootstrap.branding.copy.managedSubscriptionLabel) || "Billed automatically";
           } else {
             meta.textContent = "One-time payment";
           }
           const button = document.createElement("button");
-          button.className = "primary";
+          button.className = "primary plan-select";
           button.type = "button";
           button.textContent = isActivePlan ? "Selected" : "Select";
           button.disabled = isActivePlan;
           button.addEventListener("click", () => startCheckout(price.lookupKey));
 
-          plan.append(title, amount, meta, button);
+          plan.append(title, amount, amountSubline, meta, button);
 
           const isActiveByok = Boolean(isActivePlan && membership && membership.mode === "byok");
-          if (price.mode === "byok") {
+          if (price.mode === "byok" && isActiveByok) {
             const byokMessage = document.createElement("div");
             byokMessage.className = "tiny";
-            byokMessage.textContent = isActiveByok
-              ? (bootstrap.branding.copy && bootstrap.branding.copy.byokSubtitle) || "Add your provider key below."
-              : "After selecting BYOK, you will add your provider key here.";
+            byokMessage.textContent =
+              (bootstrap.branding.copy && bootstrap.branding.copy.byokSubtitle) || "Add your provider key below.";
             plan.appendChild(byokMessage);
           }
 
@@ -2266,16 +2299,22 @@ function renderPaywallHtml(input: {
         startForm.classList.toggle("hidden", signedIn);
         verifyForm.classList.toggle("hidden", !state.email || signedIn);
         signedInNote.classList.toggle("hidden", !signedIn);
+        authActions.classList.toggle("hidden", !signedIn);
         plansStep.classList.toggle("hidden", !signedIn);
         accountStep.classList.toggle("hidden", !signedIn);
 
         if (!signedIn) {
+          authTitle.textContent = "Sign In";
+          authSubtitle.textContent = ${JSON.stringify(copy?.accessSubtitle ?? "Use your email to get a sign-in code.")};
+          signedInNote.textContent = "";
           accountSummary.textContent = "";
           portalButton.classList.add("hidden");
           renderPlans();
           return;
         }
 
+        authTitle.textContent = "Account";
+        authSubtitle.textContent = "You're signed in and can manage your plan below.";
         signedInNote.textContent = "Signed in as " + state.me.email + ".";
         if (!paid) {
           accountSummary.textContent = "No active plan yet. Choose one above to continue.";
