@@ -1869,6 +1869,12 @@ function renderPaywallHtml(input: {
         margin: 0;
         font-size: 18px;
       }
+      #plansStep .step-head h2 {
+        margin-bottom: 8px;
+      }
+      #plansStep .step-head .subtle {
+        margin-bottom: 8px;
+      }
       .subtle {
         color: var(--muted);
         font-size: 14px;
@@ -2428,11 +2434,18 @@ function renderPaywallHtml(input: {
       renderPlans();
       renderAccount();
       if (bootstrap.preview && bootstrap.preview.enabled) {
+        const previewMode = bootstrap.preview.mode || "managed";
+        const previewPrice =
+          bootstrap.prices.find((price) => price.mode === previewMode) ||
+          bootstrap.prices[0];
         state.me = {
           email: bootstrap.preview.email || "preview@example.com",
           membership: {
             paid: Boolean(bootstrap.preview.paid),
-            mode: bootstrap.preview.mode || "managed",
+            mode: previewMode,
+            lookupKey: previewPrice ? previewPrice.lookupKey : undefined,
+            billingType: previewPrice ? previewPrice.type : undefined,
+            billingScheme: previewPrice ? previewPrice.billingScheme : undefined,
           },
         };
         renderAccount();
