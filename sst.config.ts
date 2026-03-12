@@ -14,6 +14,9 @@ export default $config({
   },
   async run() {
     await import("dotenv/config");
+    const customDomain = readOptionalEnv("PAYWALLM_DOMAIN");
+    const customDomainHostedZone = readOptionalEnv("PAYWALLM_DOMAIN_HOSTED_ZONE");
+    const publicBaseUrl = readOptionalEnv("PAYWALLM_PUBLIC_BASE_URL");
     const required = [
       "AWS_REGION",
       "AWS_ACCOUNT_ID",
@@ -28,6 +31,14 @@ export default $config({
     for (const key of required) {
       if (!process.env[key]) {
         throw new Error(`Missing required env var in .env: ${key}`);
+      }
+    }
+
+    if (publicBaseUrl) {
+      try {
+        new URL(publicBaseUrl);
+      } catch {
+        throw new Error("PAYWALLM_PUBLIC_BASE_URL must be a valid absolute URL");
       }
     }
 
@@ -85,7 +96,18 @@ export default $config({
       },
     } as const;
 
-    const api = new sst.aws.ApiGatewayV2("Api");
+    const api = new sst.aws.ApiGatewayV2("Api", {
+      domain: customDomain
+        ? customDomainHostedZone
+          ? {
+              name: customDomain,
+              dns: sst.aws.dns({
+                zone: customDomainHostedZone,
+              }),
+            }
+          : customDomain
+        : undefined,
+    });
 
     const publicRoutes = [
       "OPTIONS /{proxy+}",
@@ -127,7 +149,13 @@ export default $config({
 
     return {
       apiUrl: api.url,
+      publicBaseUrl: publicBaseUrl ?? api.url,
       tableName: table.name,
     };
   },
 });
+
+function readOptionalEnv(name: string): string | undefined {
+  const value = process.env[name]?.trim();
+  return value ? value : undefined;
+}

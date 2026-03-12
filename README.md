@@ -33,6 +33,12 @@ Runtime toggle:
 
 - `DEV_ECHO_LOGIN_CODE`
 
+Optional deploy/domain config:
+
+- `PAYWALLM_DOMAIN`
+- `PAYWALLM_DOMAIN_HOSTED_ZONE`
+- `PAYWALLM_PUBLIC_BASE_URL`
+
 CLI convenience:
 
 - `PAYWALLM_API_URL`
@@ -45,6 +51,9 @@ Notes:
 - `PAYWALLM_API_URL` is optional. After a successful deploy, the CLI can also read `.sst/outputs.json` from the current working directory as a last-resort fallback.
 - If `DEV_ECHO_LOGIN_CODE=1`, `/auth/start` returns the login code in the API response instead of sending email. That is only for local/dev setup.
 - For global CLI use, prefer `~/.config/paywallm/config.json` (or `$XDG_CONFIG_HOME/paywallm/config.json`).
+- `PAYWALLM_DOMAIN` lets SST provision the service at a custom hostname such as `auth.mydomain.com` instead of only the default AWS API hostname.
+- `PAYWALLM_DOMAIN_HOSTED_ZONE` is optional and lets you pin the Route53 hosted zone SST should use for DNS validation/records when autodetection is not enough.
+- `PAYWALLM_PUBLIC_BASE_URL` is optional and overrides the canonical public base URL returned in SST outputs. Leave it blank unless you need a specific externally visible URL.
 
 ## Install
 
@@ -100,6 +109,8 @@ After deploy:
 - copy the deployed API URL into `PAYWALLM_API_URL` in `.env`, or
 - put it in your user config file, or
 - leave it blank and let the CLI read `.sst/outputs.json` when you run from the repo
+
+If `PAYWALLM_DOMAIN=auth.mydomain.com` is set before deploy, the hosted paywall and API can live on that subdomain while the user's main product stays on `mydomain.com` or `www.mydomain.com`.
 
 ## CLI
 
@@ -503,6 +514,30 @@ For managed metered plans, these rows represent requests whose usage was recorde
 MIT. See [LICENSE](/Users/matthew/Code/Personal/paywallm/LICENSE).
 
 ## Web App Workflow
+
+### Custom Domain Deployment
+
+The intended production shape is:
+
+- `https://mydomain.com` or `https://www.mydomain.com` for the main product site
+- `https://auth.mydomain.com` for Paywallm
+
+That keeps the hosted paywall, auth endpoints, billing routes, and LLM relay on a dedicated subdomain without forcing the customer to move their main site.
+
+Minimal setup:
+
+1. Set `PAYWALLM_DOMAIN=auth.mydomain.com` in `.env`.
+2. If needed, set `PAYWALLM_DOMAIN_HOSTED_ZONE=mydomain.com`.
+3. Deploy with `yarn deploy`.
+4. Point Stripe webhooks at `https://auth.mydomain.com/stripe/webhook`.
+5. Set `STRIPE_SUCCESS_URL` and `STRIPE_CANCEL_URL` to pages on `https://mydomain.com` or `https://www.mydomain.com`.
+6. Create or update each app with `--origin https://mydomain.com` and/or `--origin https://www.mydomain.com`.
+
+Notes:
+
+- The hosted paywall page at `/p/:appId` uses relative API calls, so when the service is mounted at `auth.mydomain.com`, the UI and API stay same-origin.
+- The `paywallm_session` cookie is host-scoped to the Paywallm domain. That is correct for `auth.mydomain.com`; your main site should treat Paywallm as a separate auth/billing surface.
+- For embedded iframes and native clients, prefer token transport instead of depending on cross-site cookies.
 
 There are two recommended integration patterns for web apps:
 
