@@ -14,6 +14,7 @@ import {
   QueryCommand,
   ScanCommand,
   TransactWriteCommand,
+  UpdateCommand,
 } from "@aws-sdk/lib-dynamodb";
 import { EncryptCommand, DecryptCommand, KMSClient } from "@aws-sdk/client-kms";
 import { SESClient, SendEmailCommand } from "@aws-sdk/client-ses";
@@ -21,6 +22,8 @@ import Stripe from "stripe";
 import { ZodError } from "zod";
 import { buildProviderPayload, normalizeProviderResponse } from "./llm.js";
 import {
+  LOGIN_IP_WINDOW_SECONDS,
+  isLoginStartRateLimited,
   isActiveSubscriptionStatus,
   isExpiredTtl,
   isLockedUntil,
@@ -179,6 +182,66 @@ async function authStart(
   const appId = text(body.appId);
   const email = normalizeEmail(body.email);
   const app = await requireApp(appId);
+  const nowSeconds = epochSeconds();
+  const sourceIp = readSourceIp(event);
+
+  if (sourceIp) {
+    const rateKey = key("LOGIN_RATE", appId, sourceIp);
+    const rateItem = await ddb.send(
+      new GetCommand({
+        TableName: env.tableName,
+        Key: {
+          pk: rateKey,
+          sk: rateKey,
+        },
+      }),
+    );
+
+    const existingCount = toFiniteNumber(rateItem.Item?.count);
+    const existingTtl = toFiniteNumber(rateItem.Item?.ttl);
+    if (isLoginStartRateLimited(existingCount, existingTtl, nowSeconds)) {
+      throw new Error("login_rate_limited");
+    }
+
+    const now = nowIso();
+    if (!existingTtl || isExpiredTtl(existingTtl, nowSeconds)) {
+      await ddb.send(
+        new PutCommand({
+          TableName: env.tableName,
+          Item: {
+            pk: rateKey,
+            sk: rateKey,
+            gsi1pk: key("APP", appId),
+            gsi1sk: key("LOGIN_RATE", sourceIp),
+            appId,
+            sourceIp,
+            count: 1,
+            ttl: ttlFromNow(LOGIN_IP_WINDOW_SECONDS),
+            createdAt: now,
+            updatedAt: now,
+          },
+        }),
+      );
+    } else {
+      await ddb.send(
+        new UpdateCommand({
+          TableName: env.tableName,
+          Key: {
+            pk: rateKey,
+            sk: rateKey,
+          },
+          UpdateExpression: "SET #count = :count, updatedAt = :updatedAt",
+          ExpressionAttributeNames: {
+            "#count": "count",
+          },
+          ExpressionAttributeValues: {
+            ":count": (existingCount ?? 0) + 1,
+            ":updatedAt": now,
+          },
+        }),
+      );
+    }
+  }
 
   const loginItem = await ddb.send(
     new GetCommand({
@@ -192,7 +255,6 @@ async function authStart(
 
   if (loginItem.Item) {
     const existing = parseLoginCodeRecord(loginItem.Item);
-    const nowSeconds = epochSeconds();
 
     if (isLockedUntil(existing.lockedUntil, nowSeconds)) {
       throw new Error("login_locked");
@@ -422,9 +484,9 @@ async function paywallPage(
   const app = await requireApp(text(event.pathParameters?.appId));
   const embed = readQueryParam(event, "embed") === "1";
   const prefillEmail = readQueryParam(event, "email") ?? "";
-  const successUrl = readQueryParam(event, "success_url") ?? "";
-  const cancelUrl = readQueryParam(event, "cancel_url") ?? "";
-  const returnUrl = readQueryParam(event, "return_url") ?? "";
+  const successUrl = pickRedirectUrl(readQueryParam(event, "success_url"), env.stripeSuccessUrl, app.branding.allowedOrigins);
+  const cancelUrl = pickRedirectUrl(readQueryParam(event, "cancel_url"), env.stripeCancelUrl, app.branding.allowedOrigins);
+  const returnUrl = pickRedirectUrl(readQueryParam(event, "return_url"), "", app.branding.allowedOrigins);
   const checkoutState = readQueryParam(event, "checkout") ?? "";
   const sessionTransport = paywallSessionTransport(readQueryParam(event, "session_transport"), embed);
   const html = renderPaywallHtml({
@@ -564,9 +626,9 @@ async function billingCheckout(
   const session = await requireSession(event);
   const body = await bodyJson(event);
   const lookupKey = text(body.lookupKey);
-  const successUrl = pickRedirectUrl(body.successUrl, env.stripeSuccessUrl);
-  const cancelUrl = pickRedirectUrl(body.cancelUrl, env.stripeCancelUrl);
   const app = await requireApp(session.appId);
+  const successUrl = pickRedirectUrl(body.successUrl, env.stripeSuccessUrl, app.branding.allowedOrigins);
+  const cancelUrl = pickRedirectUrl(body.cancelUrl, env.stripeCancelUrl, app.branding.allowedOrigins);
   const user = await requireUser(session.userId);
   const userEmail = requireUserEmail(user, session.email);
   const price = app.prices.find((entry) => entry.lookupKey === lookupKey);
@@ -670,7 +732,7 @@ async function billingPortal(
 
   const portal = await stripe.billingPortal.sessions.create({
     customer: text(membership.stripeCustomerId),
-    return_url: pickRedirectUrl(body.returnUrl, env.stripeSuccessUrl),
+    return_url: pickRedirectUrl(body.returnUrl, env.stripeSuccessUrl, app.branding.allowedOrigins),
   });
 
   return withAllowedOrigins(json(200, { ok: true, url: portal.url }), app.branding.allowedOrigins);
@@ -1898,6 +1960,11 @@ function epochSeconds(): number {
 function readQueryParam(event: APIGatewayProxyEventV2, name: string): string | undefined {
   const value = event.queryStringParameters?.[name];
   return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function readSourceIp(event: APIGatewayProxyEventV2): string | undefined {
+  const value = event.requestContext.http.sourceIp;
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
 }
 
 function readQueryParams(event: APIGatewayProxyEventV2): URLSearchParams {
@@ -3662,7 +3729,8 @@ function statusForError(message: string): number {
     message === "price_not_found" ||
     message === "invalid_limit" ||
     message === "duplicate_lookup_key" ||
-    message === "invalid_session_transport"
+    message === "invalid_session_transport" ||
+    message === "invalid_redirect_url"
   ) {
     return 400;
   }
@@ -3706,7 +3774,7 @@ function statusForError(message: string): number {
     return 409;
   }
 
-  if (message === "login_locked" || message === "login_code_recently_sent") {
+  if (message === "login_locked" || message === "login_code_recently_sent" || message === "login_rate_limited") {
     return 429;
   }
 

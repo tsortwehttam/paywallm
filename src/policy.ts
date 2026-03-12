@@ -3,6 +3,8 @@ import type { MembershipRecord, Mode } from "./shared.js";
 export const LOGIN_CODE_RESEND_COOLDOWN_SECONDS = 60;
 export const LOGIN_LOCK_SECONDS = 10 * 60;
 export const MAX_LOGIN_ATTEMPTS = 5;
+export const LOGIN_IP_WINDOW_SECONDS = 10 * 60;
+export const MAX_LOGIN_STARTS_PER_IP_WINDOW = 10;
 
 export function isExpiredTtl(ttl: number, nowSeconds = currentEpochSeconds()): boolean {
   return ttl <= nowSeconds;
@@ -44,9 +46,41 @@ export function isMembershipEntitled(
   return Boolean(membership?.paid && membership.mode === mode);
 }
 
-export function pickRedirectUrl(override: unknown, fallback: string): string {
+export function isLoginStartRateLimited(
+  count: number | undefined,
+  ttl: number | undefined,
+  nowSeconds = currentEpochSeconds(),
+): boolean {
+  return (
+    typeof count === "number" &&
+    count >= MAX_LOGIN_STARTS_PER_IP_WINDOW &&
+    typeof ttl === "number" &&
+    ttl > nowSeconds
+  );
+}
+
+export function pickRedirectUrl(
+  override: unknown,
+  fallback: string,
+  allowedOrigins: string[] = [],
+): string {
   if (typeof override === "string" && override.trim().length > 0) {
-    return override.trim();
+    const candidate = parseAbsoluteUrl(override.trim());
+    if (!candidate) {
+      throw new Error("invalid_redirect_url");
+    }
+
+    const allowed = new Set<string>(allowedOrigins.map((origin) => parseAbsoluteUrl(origin)?.origin).filter(Boolean) as string[]);
+    const fallbackOrigin = parseAbsoluteUrl(fallback)?.origin;
+    if (fallbackOrigin) {
+      allowed.add(fallbackOrigin);
+    }
+
+    if (!allowed.has(candidate.origin)) {
+      throw new Error("invalid_redirect_url");
+    }
+
+    return candidate.toString();
   }
 
   return fallback;
@@ -58,4 +92,12 @@ export function isActiveSubscriptionStatus(status: string | null | undefined): b
 
 function currentEpochSeconds(): number {
   return Math.floor(Date.now() / 1000);
+}
+
+function parseAbsoluteUrl(value: string): URL | undefined {
+  try {
+    return new URL(value);
+  } catch {
+    return undefined;
+  }
 }
